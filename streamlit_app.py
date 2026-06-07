@@ -173,16 +173,18 @@ def main() -> None:
     enriched_df = enrich_transactions(raw_df)
     filtered_df = render_sidebar_filters(enriched_df)
 
-    tabs = st.tabs(["總覽", "新增與收付款", "明細查詢", "Excel 匯入匯出", "設定"])
+    tabs = st.tabs(["總覽", "新增帳款", "已收已付", "明細查詢", "Excel 匯入匯出", "設定"])
     with tabs[0]:
         render_dashboard(filtered_df)
     with tabs[1]:
         render_entry_and_payment(raw_df)
     with tabs[2]:
-        render_simple_detail_table(filtered_df)
+        render_payment_records(raw_df)
     with tabs[3]:
-        render_excel_tools(raw_df)
+        render_simple_detail_table(filtered_df)
     with tabs[4]:
+        render_excel_tools(raw_df)
+    with tabs[5]:
         render_settings()
 
 
@@ -403,6 +405,24 @@ def delete_transaction(record_id: str) -> None:
         conn.execute("DELETE FROM transactions WHERE id = ?", (record_id,))
 
 
+def register_payment(record_id: str, payment_amount_twd: float, payment_date_value: date) -> None:
+    payment_amount = max(safe_float(payment_amount_twd), 0)
+    if payment_amount <= 0:
+        raise ValueError("請填寫本次收/付款金額。")
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM transactions WHERE id = ?", (record_id,)).fetchone()
+        if row is None:
+            raise ValueError("找不到這筆帳款。")
+
+    record = dict(row)
+    total_amount = safe_float(record.get("amount_twd"))
+    current_paid = safe_float(record.get("paid_amount_twd"))
+    record["paid_amount_twd"] = min(total_amount, current_paid + payment_amount)
+    record["payment_date"] = payment_date_value
+    upsert_transaction(record)
+
+
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def get_live_exchange_rate(currency: str) -> tuple[float, str]:
     currency_code = clean_text(currency).upper() or "TWD"
@@ -589,7 +609,7 @@ def render_sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
 
 def render_dashboard(df: pd.DataFrame) -> None:
     if df.empty:
-        st.info("尚未有帳款資料，可以先到「新增與收付款」或「Excel 匯入匯出」建立資料。")
+        st.info("尚未有帳款資料，可以先到「新增帳款」或「Excel 匯入匯出」建立資料。")
         return
 
     receivable = df[df["應收/應付"] == "應收"]["未結金額"].sum()
@@ -985,6 +1005,7 @@ def render_simple_detail_table(df: pd.DataFrame) -> None:
         "結帳方式",
         "交易日期",
         "到期日",
+        "收付款日期",
         "已收/已付金額",
         "未結金額",
     ]
@@ -1006,6 +1027,102 @@ def render_simple_detail_table(df: pd.DataFrame) -> None:
         .sort_values("未結金額", ascending=False)
     )
     st.dataframe(format_money_columns(summary), hide_index=True, use_container_width=True)
+
+
+def render_payment_records(raw_df: pd.DataFrame) -> None:
+    if raw_df.empty:
+        st.info("目前沒有帳款資料。")
+        return
+
+    df = enrich_transactions(raw_df)
+    register_tab, history_tab = st.tabs(["登記收/付款", "已收已付清單"])
+
+    with register_tab:
+        outstanding = df[df["未結金額"] > 0].copy()
+        if outstanding.empty:
+            st.success("目前沒有未結帳款。")
+        else:
+            st.subheader("登記收款或付款")
+            st.caption("選一筆未結帳款，填收付款日期與本次金額。日期會寫進對帳報表。")
+            options = build_payment_options(outstanding)
+            selected_label = st.selectbox("選擇未結帳款", list(options.keys()))
+            selected_id = options[selected_label]
+            selected_display = df[df["ID"] == selected_id].iloc[0]
+            outstanding_amount = safe_float(selected_display["未結金額"])
+            action_name = "收款" if selected_display["應收/應付"] == "應收" else "付款"
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("帳款類型", selected_display["應收/應付"])
+                st.metric("未結金額", money(outstanding_amount))
+            with col2:
+                st.metric("客戶/供應商", selected_display["客戶/供應商"])
+                st.metric("到期日", selected_display["到期日"].date().isoformat() if pd.notna(selected_display["到期日"]) else "")
+            with col3:
+                st.metric("結帳方式", selected_display["結帳方式"])
+                st.metric("狀態", selected_display["狀態"])
+
+            pay_col, date_col = st.columns(2)
+            with date_col:
+                payment_date = st.date_input(f"{action_name}日期", value=today(), key="payment_record_date")
+            with pay_col:
+                payment_amount = st.number_input(
+                    f"本次{action_name}金額",
+                    min_value=0.0,
+                    value=float(outstanding_amount),
+                    step=1000.0,
+                    format="%.2f",
+                    key="payment_record_amount",
+                )
+
+            if st.button(f"登記{action_name}", type="primary", use_container_width=True):
+                try:
+                    register_payment(selected_id, payment_amount, payment_date)
+                    st.success(f"已登記{action_name}，日期：{payment_date.isoformat()}。")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    with history_tab:
+        paid = df[df["已收/已付金額"] > 0].copy()
+        if paid.empty:
+            st.info("目前還沒有已收或已付紀錄。")
+            return
+        paid = paid.sort_values(["收付款日期", "交易日期"], ascending=[False, False], na_position="last")
+        visible_cols = [
+            "狀態",
+            "應收/應付",
+            "客戶/供應商",
+            "發票號碼",
+            "收付款日期",
+            "已收/已付金額",
+            "未結金額",
+            "台幣金額",
+            "幣別",
+            "原幣金額",
+            "結帳方式",
+            "交易日期",
+            "備註",
+        ]
+        st.dataframe(
+            format_money_columns(paid[[col for col in visible_cols if col in paid.columns]]),
+            hide_index=True,
+            use_container_width=True,
+            height=520,
+        )
+
+
+def build_payment_options(df: pd.DataFrame) -> dict[str, str]:
+    options: dict[str, str] = {}
+    for _, row in df.sort_values(["到期日", "客戶/供應商"]).iterrows():
+        due = row["到期日"].date().isoformat() if pd.notna(row["到期日"]) else ""
+        invoice_no = clean_text(row.get("發票號碼")) or "無發票"
+        label = (
+            f"{due} | {row['應收/應付']} | {row['客戶/供應商']} | "
+            f"{invoice_no} | 未結 {money(row['未結金額'])}"
+        )
+        options[label] = row["ID"]
+    return options
 
 
 def build_record_options(df: pd.DataFrame) -> dict[str, str]:

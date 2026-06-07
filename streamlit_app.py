@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import calendar
 import io
+import json
 import os
 import sqlite3
 import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -176,7 +179,7 @@ def main() -> None:
     with tabs[1]:
         render_entry_and_payment(raw_df)
     with tabs[2]:
-        render_detail_table(filtered_df)
+        render_simple_detail_table(filtered_df)
     with tabs[3]:
         render_excel_tools(raw_df)
     with tabs[4]:
@@ -315,6 +318,8 @@ def upsert_transaction(record: dict[str, Any]) -> str:
     grace_days = int(record.get("grace_days") or 0)
     amount_original = safe_float(record.get("amount_original"))
     exchange_rate = safe_float(record.get("exchange_rate"), default=1.0)
+    if exchange_rate <= 0:
+        exchange_rate, _ = get_live_exchange_rate(record.get("currency", "TWD"))
     amount_twd = round(amount_original * exchange_rate, 2)
     due_date = calculate_due_date(invoice_date, record.get("settlement_cycle", "月結"), grace_days)
     payment_date = coerce_date(record.get("payment_date"))
@@ -396,6 +401,28 @@ def upsert_transaction(record: dict[str, Any]) -> str:
 def delete_transaction(record_id: str) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM transactions WHERE id = ?", (record_id,))
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def get_live_exchange_rate(currency: str) -> tuple[float, str]:
+    currency_code = clean_text(currency).upper() or "TWD"
+    if currency_code == "TWD":
+        return 1.0, "TWD"
+
+    url = f"https://open.er-api.com/v6/latest/{currency_code}"
+    try:
+        request = Request(url, headers={"User-Agent": "XingqiangAccounting/1.0"})
+        with urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if payload.get("result") != "success":
+            return 1.0, "匯率服務暫時無法使用"
+        rate = safe_float(payload.get("rates", {}).get("TWD"), default=0)
+        if rate <= 0:
+            return 1.0, "找不到 TWD 匯率"
+        updated = clean_text(payload.get("time_last_update_utc")) or "latest"
+        return rate, updated
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError):
+        return 1.0, "匯率服務暫時無法連線"
 
 
 def replace_transactions(records: list[dict[str, Any]]) -> None:
@@ -623,7 +650,7 @@ def render_dashboard(df: pd.DataFrame) -> None:
 def render_entry_and_payment(raw_df: pd.DataFrame) -> None:
     add_tab, edit_tab = st.tabs(["新增帳款", "編輯與收付款"])
     with add_tab:
-        saved = render_transaction_form(None, "add_record")
+        saved = render_simple_transaction_form(None, "add_record")
         if saved:
             st.success("已新增帳款。")
             st.rerun()
@@ -636,7 +663,7 @@ def render_entry_and_payment(raw_df: pd.DataFrame) -> None:
         selected_label = st.selectbox("選擇帳款", list(options.keys()))
         selected_id = options[selected_label]
         selected_row = raw_df[raw_df["id"] == selected_id].iloc[0].to_dict()
-        saved = render_transaction_form(selected_row, "edit_record")
+        saved = render_simple_transaction_form(selected_row, "edit_record")
         if saved:
             st.success("已更新帳款。")
             st.rerun()
@@ -755,6 +782,230 @@ def render_transaction_form(existing: dict[str, Any] | None, form_key: str) -> b
             }
         )
         return True
+
+
+def render_simple_transaction_form(existing: dict[str, Any] | None, form_key: str) -> bool:
+    existing = existing or {}
+    record_id = clean_text(existing.get("id")) or "new"
+    prefix = f"{form_key}_{record_id}"
+
+    st.markdown("#### 簡化記帳")
+    st.caption("先填對帳一定會用到的資料；訂單、提單、承辦人等細節可放到進階欄位。")
+
+    basic_col, amount_col, settlement_col = st.columns(3)
+    with basic_col:
+        invoice_date = st.date_input(
+            "日期",
+            value=coerce_date(existing.get("invoice_date")) or today(),
+            key=f"{prefix}_invoice_date",
+        )
+        trade_flow = st.selectbox(
+            "進出口",
+            TRADE_FLOWS,
+            index=index_of(TRADE_FLOWS, existing.get("trade_flow"), 0),
+            key=f"{prefix}_trade_flow",
+        )
+        default_side = "應收" if trade_flow == "出口" else "應付"
+        account_side = st.selectbox(
+            "帳款類型",
+            ACCOUNT_SIDES,
+            index=index_of(ACCOUNT_SIDES, existing.get("account_side"), ACCOUNT_SIDES.index(default_side)),
+            key=f"{prefix}_account_side",
+        )
+        counterparty = st.text_input(
+            "客戶/供應商",
+            value=clean_text(existing.get("counterparty")),
+            key=f"{prefix}_counterparty",
+        )
+        invoice_no = st.text_input(
+            "發票號碼",
+            value=clean_text(existing.get("invoice_no")),
+            key=f"{prefix}_invoice_no",
+        )
+
+    with amount_col:
+        currency_default = clean_text(existing.get("currency")).upper() or "TWD"
+        currency_options = CURRENCIES if currency_default in CURRENCIES else [currency_default] + CURRENCIES
+        currency = st.selectbox(
+            "幣別",
+            currency_options,
+            index=0 if currency_default not in CURRENCIES else CURRENCIES.index(currency_default),
+            key=f"{prefix}_currency",
+        )
+        amount_original = st.number_input(
+            "原幣金額",
+            min_value=0.0,
+            value=float(existing.get("amount_original") or 0),
+            step=1000.0,
+            format="%.2f",
+            key=f"{prefix}_amount_original",
+        )
+        live_rate, rate_note = get_live_exchange_rate(currency)
+        if currency == "TWD":
+            exchange_rate = 1.0
+            st.caption("台幣不用換算。")
+        else:
+            has_existing_rate = bool(existing.get("id")) and safe_float(existing.get("exchange_rate")) > 0
+            rate_mode = st.radio(
+                "匯率",
+                ["自動抓匯率", "手動輸入"],
+                index=1 if has_existing_rate else 0,
+                horizontal=True,
+                key=f"{prefix}_rate_mode",
+            )
+            if rate_mode == "自動抓匯率":
+                exchange_rate = live_rate
+                if exchange_rate == 1.0 and "latest" not in rate_note:
+                    st.warning(rate_note)
+                else:
+                    st.caption(f"線上匯率：1 {currency} = {exchange_rate:,.4f} TWD")
+            else:
+                exchange_rate = st.number_input(
+                    "手動匯率",
+                    min_value=0.0,
+                    value=float(existing.get("exchange_rate") or live_rate or 1),
+                    step=0.01,
+                    format="%.6f",
+                    key=f"{prefix}_exchange_rate",
+                )
+        amount_twd = round(amount_original * exchange_rate, 2)
+        st.metric("自動換算台幣", money(amount_twd))
+
+    with settlement_col:
+        settlement_cycle = st.selectbox(
+            "結帳方式",
+            SETTLEMENT_CYCLES,
+            index=index_of(SETTLEMENT_CYCLES, existing.get("settlement_cycle"), 1),
+            key=f"{prefix}_settlement_cycle",
+        )
+        grace_days = st.number_input(
+            "付款天數",
+            min_value=0,
+            value=int(existing.get("grace_days") or 0),
+            step=1,
+            key=f"{prefix}_grace_days",
+        )
+        projected_due = calculate_due_date(invoice_date, settlement_cycle, int(grace_days))
+        st.metric("到期日", projected_due.isoformat())
+        paid_amount_twd = st.number_input(
+            "已收/已付金額",
+            min_value=0.0,
+            value=float(existing.get("paid_amount_twd") or 0),
+            step=1000.0,
+            format="%.2f",
+            key=f"{prefix}_paid_amount_twd",
+        )
+        st.metric("未結金額", money(max(amount_twd - paid_amount_twd, 0)))
+
+    with st.expander("進階欄位", expanded=False):
+        adv1, adv2 = st.columns(2)
+        with adv1:
+            order_no = st.text_input("訂單號碼", value=clean_text(existing.get("order_no")), key=f"{prefix}_order_no")
+            shipment_no = st.text_input(
+                "提單/報關號碼",
+                value=clean_text(existing.get("shipment_no")),
+                key=f"{prefix}_shipment_no",
+            )
+            item_description = st.text_input(
+                "品名/摘要",
+                value=clean_text(existing.get("item_description")),
+                key=f"{prefix}_item_description",
+            )
+            owner = st.text_input("承辦人", value=clean_text(existing.get("owner")), key=f"{prefix}_owner")
+        with adv2:
+            bank_account = st.text_input(
+                "銀行/帳戶",
+                value=clean_text(existing.get("bank_account")),
+                key=f"{prefix}_bank_account",
+            )
+            has_payment_date = st.checkbox(
+                "填寫收付款日期",
+                value=bool(existing.get("payment_date")),
+                key=f"{prefix}_has_payment_date",
+            )
+            payment_date = None
+            if has_payment_date:
+                payment_date = st.date_input(
+                    "收付款日期",
+                    value=coerce_date(existing.get("payment_date")) or today(),
+                    key=f"{prefix}_payment_date",
+                )
+            notes = st.text_area("備註", value=clean_text(existing.get("notes")), height=84, key=f"{prefix}_notes")
+
+    if st.button("儲存帳款", type="primary", key=f"{prefix}_save"):
+        if not clean_text(counterparty):
+            st.error("請填寫客戶/供應商。")
+            return False
+        if amount_original <= 0:
+            st.error("請填寫金額。")
+            return False
+        upsert_transaction(
+            {
+                "id": existing.get("id"),
+                "trade_flow": trade_flow,
+                "account_side": account_side,
+                "counterparty": counterparty,
+                "invoice_no": invoice_no,
+                "order_no": order_no,
+                "shipment_no": shipment_no,
+                "item_description": item_description,
+                "currency": currency,
+                "amount_original": amount_original,
+                "exchange_rate": exchange_rate,
+                "settlement_cycle": settlement_cycle,
+                "invoice_date": invoice_date,
+                "grace_days": int(grace_days),
+                "paid_amount_twd": paid_amount_twd,
+                "payment_date": payment_date,
+                "bank_account": bank_account,
+                "owner": owner,
+                "notes": notes,
+            }
+        )
+        return True
+    return False
+
+
+def render_simple_detail_table(df: pd.DataFrame) -> None:
+    if df.empty:
+        st.info("沒有符合條件的明細。")
+        return
+
+    st.subheader("簡化明細")
+    visible_cols = [
+        "狀態",
+        "進出口",
+        "應收/應付",
+        "客戶/供應商",
+        "發票號碼",
+        "幣別",
+        "原幣金額",
+        "匯率",
+        "台幣金額",
+        "結帳方式",
+        "交易日期",
+        "到期日",
+        "已收/已付金額",
+        "未結金額",
+    ]
+    view = df[[col for col in visible_cols if col in df.columns]].copy()
+    st.dataframe(format_money_columns(view), hide_index=True, use_container_width=True, height=420)
+
+    with st.expander("完整欄位", expanded=False):
+        st.dataframe(format_money_columns(df.copy()), hide_index=True, use_container_width=True, height=520)
+
+    st.subheader("客戶/供應商彙總")
+    summary = (
+        df.pivot_table(
+            index=["客戶/供應商", "應收/應付"],
+            values=["台幣金額", "已收/已付金額", "未結金額"],
+            aggfunc="sum",
+            fill_value=0,
+        )
+        .reset_index()
+        .sort_values("未結金額", ascending=False)
+    )
+    st.dataframe(format_money_columns(summary), hide_index=True, use_container_width=True)
 
 
 def build_record_options(df: pd.DataFrame) -> dict[str, str]:
@@ -884,7 +1135,9 @@ def parse_uploaded_workbook(uploaded_file: Any) -> list[dict[str, Any]]:
         invoice_date = coerce_date(row.get("invoice_date")) or today()
         settlement_cycle = normalize_cycle(row.get("settlement_cycle"))
         grace_days = int(safe_float(row.get("grace_days")))
-        exchange_rate = safe_float(row.get("exchange_rate"), default=1.0)
+        exchange_rate = safe_float(row.get("exchange_rate"), default=0.0)
+        if exchange_rate <= 0:
+            exchange_rate, _ = get_live_exchange_rate(clean_text(row.get("currency")).upper() or "TWD")
         amount_original = safe_float(row.get("amount_original"))
         amount_twd = safe_float(row.get("amount_twd"), default=amount_original * exchange_rate)
         if amount_original <= 0 and amount_twd <= 0:

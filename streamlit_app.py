@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 APP_TZ = ZoneInfo("Asia/Taipei")
@@ -168,8 +169,14 @@ def main() -> None:
     st.title(f"{COMPANY_SHORT_NAME}記帳平台")
     st.caption("進出口代理、應收應付、結帳週期與 Excel 對帳一次整理。")
     render_company_strip()
+    init_session_flags()
+
+    if not st.session_state["data_loaded"]:
+        render_initial_load_screen()
+        return
 
     raw_df = fetch_transactions()
+    render_download_reminder(raw_df)
     enriched_df = enrich_transactions(raw_df)
     filtered_df = render_sidebar_filters(enriched_df)
 
@@ -186,6 +193,136 @@ def main() -> None:
         render_excel_tools(raw_df)
     with tabs[5]:
         render_settings()
+
+
+def init_session_flags() -> None:
+    st.session_state.setdefault("data_loaded", False)
+    st.session_state.setdefault("data_downloaded", False)
+    st.session_state.setdefault("data_changed", False)
+
+
+def mark_data_loaded() -> None:
+    st.session_state["data_loaded"] = True
+    st.session_state["data_downloaded"] = False
+    st.session_state["data_changed"] = False
+
+
+def mark_data_changed() -> None:
+    st.session_state["data_downloaded"] = False
+    st.session_state["data_changed"] = True
+
+
+def mark_data_downloaded() -> None:
+    st.session_state["data_downloaded"] = True
+    st.session_state["data_changed"] = False
+
+
+def report_file_name() -> str:
+    return f"{COMPANY_SHORT_NAME}_對帳備份_{today().isoformat()}.xlsx"
+
+
+def render_initial_load_screen() -> None:
+    st.warning("每次開始記帳前，請先上傳上一次下載的 Excel 對帳備份。")
+    st.caption("這樣 Excel 就是主檔；系統只負責本次工作期間的新增、收款、付款與對帳。")
+
+    col1, col2 = st.columns([1.2, 1])
+    with col1:
+        uploaded = st.file_uploader("載入 Excel 對帳備份", type=["xlsx", "xls"], key="initial_excel_upload")
+        if uploaded is not None:
+            try:
+                records = parse_uploaded_workbook(uploaded)
+                preview = enrich_transactions(pd.DataFrame(records))
+                st.dataframe(preview.head(10), hide_index=True, use_container_width=True)
+                if st.button("確認載入資料", type="primary", use_container_width=True):
+                    replace_transactions(records)
+                    mark_data_loaded()
+                    st.success(f"已載入 {len(records)} 筆資料。")
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"載入失敗：{exc}")
+
+    with col2:
+        st.download_button(
+            "下載空白匯入範本",
+            data=build_template_workbook(),
+            file_name=f"{COMPANY_SHORT_NAME}_匯入範本.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        local_df = fetch_transactions()
+        st.button(
+            "載入本機暫存資料",
+            disabled=local_df.empty,
+            use_container_width=True,
+            on_click=mark_data_loaded,
+            help="本機測試時可用；正式部署建議每次上傳 Excel 備份。",
+        )
+        if st.button("從空白開始", use_container_width=True):
+            replace_transactions([])
+            mark_data_loaded()
+            st.rerun()
+
+
+def render_download_reminder(raw_df: pd.DataFrame) -> None:
+    should_warn = bool(st.session_state.get("data_loaded")) and not bool(st.session_state.get("data_downloaded"))
+    inject_close_warning(should_warn)
+
+    if raw_df.empty:
+        st.info("目前沒有資料。若要離開，建議先下載空白範本或確認本次沒有帳款需要保存。")
+        return
+
+    if should_warn:
+        st.warning("離開或關閉視窗前，請先下載今日 Excel 對帳備份。")
+    else:
+        st.success("今日 Excel 備份已下載；如果後續又新增或登記收付款，系統會再次提醒。")
+
+    st.download_button(
+        f"下載今日 Excel：{report_file_name()}",
+        data=build_report_workbook(enrich_transactions(raw_df)),
+        file_name=report_file_name(),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        on_click=mark_data_downloaded,
+    )
+
+
+def inject_close_warning(should_warn: bool) -> None:
+    if not should_warn:
+        components.html(
+            """
+            <script>
+            try {
+              const target = window.parent || window;
+              if (target.__xingqiangBeforeUnloadHandler) {
+                target.removeEventListener("beforeunload", target.__xingqiangBeforeUnloadHandler);
+                target.__xingqiangBeforeUnloadHandler = null;
+              }
+            } catch (error) {}
+            </script>
+            """,
+            height=0,
+        )
+        return
+
+    components.html(
+        """
+        <script>
+        try {
+          const target = window.parent || window;
+          if (target.__xingqiangBeforeUnloadHandler) {
+            target.removeEventListener("beforeunload", target.__xingqiangBeforeUnloadHandler);
+          }
+          target.__xingqiangBeforeUnloadHandler = function(event) {
+            event.preventDefault();
+            event.returnValue = "離開前請確認已下載今天的 Excel 對帳備份。";
+            return event.returnValue;
+          };
+          target.addEventListener("beforeunload", target.__xingqiangBeforeUnloadHandler);
+        } catch (error) {}
+        </script>
+        """,
+        height=0,
+    )
 
 
 def render_company_strip() -> None:
@@ -692,6 +829,7 @@ def render_entry_and_payment(raw_df: pd.DataFrame) -> None:
         confirm_delete = st.checkbox("確認刪除此筆帳款")
         if st.button("刪除選取帳款", disabled=not confirm_delete, type="secondary"):
             delete_transaction(selected_id)
+            mark_data_changed()
             st.success("已刪除。")
             st.rerun()
 
@@ -801,6 +939,7 @@ def render_transaction_form(existing: dict[str, Any] | None, form_key: str) -> b
                 "notes": notes,
             }
         )
+        mark_data_changed()
         return True
 
 
@@ -982,6 +1121,7 @@ def render_simple_transaction_form(existing: dict[str, Any] | None, form_key: st
                 "notes": notes,
             }
         )
+        mark_data_changed()
         return True
     return False
 
@@ -1078,6 +1218,7 @@ def render_payment_records(raw_df: pd.DataFrame) -> None:
             if st.button(f"登記{action_name}", type="primary", use_container_width=True):
                 try:
                     register_payment(selected_id, payment_amount, payment_date)
+                    mark_data_changed()
                     st.success(f"已登記{action_name}，日期：{payment_date.isoformat()}。")
                     st.rerun()
                 except ValueError as exc:
@@ -1189,7 +1330,7 @@ def render_excel_tools(raw_df: pd.DataFrame) -> None:
         st.download_button(
             "下載 Excel 匯入範本",
             data=build_template_workbook(),
-            file_name="進出口記帳匯入範本.xlsx",
+            file_name=f"{COMPANY_SHORT_NAME}_匯入範本.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
@@ -1198,10 +1339,11 @@ def render_excel_tools(raw_df: pd.DataFrame) -> None:
         st.download_button(
             "下載完整對帳 Excel",
             data=build_report_workbook(report_df),
-            file_name=f"{COMPANY_SHORT_NAME}_進出口對帳報表_{today().isoformat()}.xlsx",
+            file_name=report_file_name(),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             disabled=report_df.empty,
+            on_click=mark_data_downloaded,
         )
 
     st.divider()
@@ -1217,6 +1359,7 @@ def render_excel_tools(raw_df: pd.DataFrame) -> None:
                     replace_transactions(records)
                 else:
                     append_transactions(records)
+                mark_data_changed()
                 st.success(f"已匯入 {len(records)} 筆資料。")
                 st.rerun()
         except Exception as exc:
@@ -1486,6 +1629,7 @@ def render_settings() -> None:
     st.subheader("示範資料")
     if st.button("載入示範資料", type="secondary"):
         append_transactions(sample_records())
+        mark_data_changed()
         st.success("已載入示範資料。")
         st.rerun()
 

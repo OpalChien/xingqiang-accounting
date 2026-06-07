@@ -9,6 +9,7 @@
 - 外幣自動抓匯率並換算台幣，也可手動覆寫匯率
 - 簡化表單優先，只把訂單、提單、承辦、銀行帳戶等放在進階欄位
 - Excel 匯入範本、Excel 對帳報表下載
+- 每次進入先載入上一次下載的 Excel，離開前下載當天日期命名的備份
 - SQLite 本機資料庫
 
 ## 公司資料
@@ -26,6 +27,19 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 streamlit run streamlit_app.py
+```
+
+## 日常使用流程
+
+1. 進入系統後，先上傳上一次下載的 Excel 對帳備份。
+2. 新增帳款、登記收款或付款。
+3. 關閉視窗前，下載今日 Excel 備份。
+4. 下次進入系統時，再上傳最新那份 Excel。
+
+下載檔名格式：
+
+```text
+興強科技_對帳備份_YYYY-MM-DD.xlsx
 ```
 
 ## 推到 GitHub

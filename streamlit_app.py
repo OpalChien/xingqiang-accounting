@@ -197,7 +197,11 @@ def render_company_strip() -> None:
             st.markdown(f"電話：`{COMPANY_PHONE}`")
         with col3:
             st.link_button("公司網站", COMPANY_WEBSITE, use_container_width=True)
-            st.markdown(f"<span class='small-muted'>{COMPANY_ADDRESS}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span class='small-muted'>{COMPANY_WEBSITE}</span><br>"
+                f"<span class='small-muted'>{COMPANY_ADDRESS}</span>",
+                unsafe_allow_html=True,
+            )
 
 
 def inject_styles() -> None:

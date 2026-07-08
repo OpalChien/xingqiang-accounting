@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>興強科技記帳平台</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260708-cloud-seed" />
   </head>
   <body>
     <div class="app-shell">
@@ -15,7 +15,6 @@
         <button class="nav-btn" data-view="payments" title="已收已付">收</button>
         <button class="nav-btn" data-view="details" title="明細查詢">明</button>
         <button class="nav-btn" data-view="customers" title="客戶主檔">客</button>
-        <button class="nav-btn" data-view="users" title="人員權限">權</button>
         <button class="nav-btn" data-view="excel" title="Excel">表</button>
       </aside>
 
@@ -27,15 +26,13 @@
             <p class="subtle">進出口帳款、ERP 客戶主檔、雲端暫存與 Excel 對帳</p>
           </div>
           <div class="top-actions">
-            <span id="saveStatus" class="status-chip">本機暫存</span>
-            <button id="signInBtn" class="secondary">登入 Google</button>
-            <button id="signOutBtn" class="secondary hidden">登出</button>
+            <span id="saveStatus" class="status-chip">公開使用</span>
           </div>
         </header>
 
         <section id="cloudNotice" class="notice">
           <strong>雲端暫存：</strong>
-          登入 Google 後可把資料存到 Firebase Firestore。若 Firebase 尚未啟用 Firestore，系統仍會保留本機暫存與 Excel 下載。
+          不用登入即可使用。資料會先存在瀏覽器本機，也可以手動存到 Firebase 雲端暫存，並下載 Excel 到本機。
         </section>
 
         <section id="dashboard" class="view active">
@@ -336,10 +333,9 @@
     </div>
 
     <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-    <script src="./app.js"></script>
+    <script src="./app.js?v=20260708-cloud-seed"></script>
   </body>
 </html>

@@ -2,49 +2,12 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    function signedIn() {
-      return request.auth != null && request.auth.token.email != null;
-    }
-
-    function bootstrapAdmin() {
-      return signedIn() && request.auth.token.email == "opal860526@gmail.com";
-    }
-
-    function profilePath() {
-      return /databases/$(database)/documents/accounts/xingqiang/users/$(request.auth.token.email);
-    }
-
-    function hasProfile() {
-      return signedIn() && exists(profilePath());
-    }
-
-    function profile() {
-      return get(profilePath()).data;
-    }
-
-    function isAdmin() {
-      return bootstrapAdmin() || (hasProfile() && profile().role == "admin");
-    }
-
-    function can(permission) {
-      return isAdmin() || (hasProfile() && profile().permissions[permission] == true);
-    }
-
-    match /accounts/xingqiang/users/{email} {
-      allow read: if signedIn() && (isAdmin() || request.auth.token.email == email);
-      allow create, update, delete: if isAdmin();
-    }
-
     match /accounts/xingqiang/customers/{customerId} {
-      allow read: if can("viewCustomers");
-      allow create, update, delete: if can("manageCustomers") || can("cloudSync");
+      allow read, write: if true;
     }
 
     match /accounts/xingqiang/transactions/{transactionId} {
-      allow read: if can("viewTransactions");
-      allow create: if can("keyinTransactions") || can("cloudSync");
-      allow update: if can("editTransactions") || can("recordPayments") || can("cloudSync");
-      allow delete: if can("deleteTransactions") || can("cloudSync");
+      allow read, write: if true;
     }
 
     match /{document=**} {

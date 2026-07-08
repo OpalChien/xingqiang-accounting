@@ -56,11 +56,9 @@ const $ = (id) => document.getElementById(id);
 
 document.addEventListener("DOMContentLoaded", async () => {
   firebase.initializeApp(firebaseConfig);
-  auth = firebase.auth();
   db = firebase.firestore();
 
   bindNavigation();
-  bindAuth();
   bindEntryForm();
   bindPaymentForm();
   bindExcelTools();
@@ -72,12 +70,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadLocalOrSeed();
   setDefaultDates();
   renderAll();
-  updateSaveStatus("本機暫存");
+  updateSaveStatus("公開使用");
 
   window.addEventListener("beforeunload", (event) => {
-    if (!state.dirty) return;
     event.preventDefault();
-    event.returnValue = "資料尚未下載或儲存雲端，確定要離開？";
+    event.returnValue = "關閉網站前，請先下載一份 Excel 備份到本機。";
   });
 });
 
@@ -114,7 +111,7 @@ function bindAuth() {
       await loadUserProfile(user.email);
       if (can("manageUsers")) await loadUsers();
     }
-    updateSaveStatus(user ? `已登入：${user.email}` : "本機暫存");
+    updateSaveStatus("公開使用");
     applyPermissions();
     renderUsers();
   });
@@ -280,6 +277,10 @@ async function loadLocalOrSeed() {
     state.customers = await fetchSeedCustomers();
     persistLocal(false);
   }
+  if (!state.transactions.length) {
+    state.transactions = buildDemoTransactions();
+    persistLocal(false);
+  }
 }
 
 async function fetchSeedCustomers() {
@@ -352,11 +353,7 @@ function permissionMap(enabledKeys) {
 }
 
 function can(permission) {
-  if (!state.user) return !["cloudSync", "manageUsers"].includes(permission);
-  if (emailKey(state.user.email) === BOOTSTRAP_ADMIN_EMAIL) return true;
-  if (!state.profile) return false;
-  if (state.profile.role === "admin") return true;
-  return !!state.profile.permissions?.[permission];
+  return true;
 }
 
 function applyPermissions() {
@@ -421,10 +418,6 @@ async function saveCloud() {
     showNotice("你目前沒有雲端暫存的權限。");
     return;
   }
-  if (!state.user) {
-    showNotice("請先登入 Google，再儲存雲端暫存。");
-    return;
-  }
   try {
     await replaceCloudCollection("customers", state.customers, "customer_id");
     await replaceCloudCollection("transactions", state.transactions, "id");
@@ -441,14 +434,10 @@ async function loadCloud() {
     showNotice("你目前沒有讀取雲端暫存的權限。");
     return;
   }
-  if (!state.user) {
-    showNotice("請先登入 Google，再讀取雲端暫存。");
-    return;
-  }
   try {
     const [customers, transactions] = await Promise.all([readCloudCollection("customers"), readCloudCollection("transactions")]);
     state.customers = customers.length ? customers.map(normalizeCustomer) : await fetchSeedCustomers();
-    state.transactions = transactions;
+    state.transactions = transactions.length ? transactions : buildDemoTransactions();
     persistLocal(false);
     state.dirty = false;
     renderAll();
@@ -1026,7 +1015,7 @@ function enrichTransaction(record) {
   const exchangeRate = Number(record.exchange_rate || 1);
   const amountTwd = Math.round(amountOriginal * exchangeRate * 100) / 100;
   const paid = Number(record.paid_amount_twd || 0);
-  const dueDate = calculateDueDate(record.invoice_date, record.settlement_cycle, Number(record.grace_days || 0));
+  const dueDate = record.due_date || calculateDueDate(record.invoice_date, record.settlement_cycle, Number(record.grace_days || 0));
   const outstanding = Math.max(amountTwd - paid, 0);
   const overdue = outstanding > 0 ? Math.max(daysBetween(dueDate, todayISO()), 0) : 0;
   return {
@@ -1040,6 +1029,47 @@ function enrichTransaction(record) {
     days_overdue: overdue,
     computed_status: outstanding <= 0 ? "已結清" : overdue > 0 ? "逾期" : paid > 0 ? "部分" : "未結",
   };
+}
+
+function buildDemoTransactions() {
+  const demoSpecs = [
+    { id: "demo-overdue-asus", customerId: "CA0603N", invoiceNo: "DEMO-001", amount: 126000, paid: 30000, dueOffset: -3, note: "示範：已逾期且部分收款" },
+    { id: "demo-week-aitken", customerId: "CA0686U", invoiceNo: "DEMO-002", amount: 68000, paid: 0, dueOffset: 3, note: "示範：3 天內到期" },
+    { id: "demo-week-delta", customerId: "CD0687N", invoiceNo: "DEMO-003", amount: 52000, paid: 0, dueOffset: 6, note: "示範：一週內到期" },
+    { id: "demo-month-ample", customerId: "CF0716U", invoiceNo: "DEMO-004", amount: 4200, paid: 0, dueOffset: 18, note: "示範：30 天內到期" },
+    { id: "demo-paid-air", customerId: "CA0601N", invoiceNo: "DEMO-005", amount: 88000, paid: 88000, dueOffset: -1, note: "示範：已結清" },
+  ];
+  return demoSpecs.map((spec) => {
+    const customer = state.customers.find((item) => item.customer_id === spec.customerId) || {};
+    const currency = normalizeCurrency(customer.currency);
+    const exchangeRate = currency === "USD" ? 32 : currency === "HKD" ? 4.1 : 1;
+    const dueDate = addDays(todayISO(), spec.dueOffset);
+    const graceDays = Number(customer.grace_days || Math.max(spec.dueOffset, 0));
+    return {
+      id: spec.id,
+      trade_flow: "出口",
+      account_side: "應收",
+      customer_id: customer.customer_id || spec.customerId,
+      counterparty: customer.english_name || spec.customerId,
+      invoice_no: spec.invoiceNo,
+      order_no: `SO-${spec.invoiceNo}`,
+      shipment_no: "",
+      item_description: "示範帳款",
+      currency,
+      amount_original: spec.amount,
+      exchange_rate: exchangeRate,
+      settlement_cycle: normalizeCycle(customer.settlement_cycle || "月結"),
+      invoice_date: addDays(dueDate, -Math.max(graceDays, 1)),
+      grace_days: graceDays,
+      due_date: dueDate,
+      paid_amount_twd: spec.paid,
+      payment_date: spec.paid > 0 ? addDays(todayISO(), -1) : "",
+      owner: customer.sales_person || "",
+      notes: spec.note,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  });
 }
 
 function calculateDueDate(invoiceDate, settlementCycle, graceDays = 0) {
@@ -1090,6 +1120,12 @@ function parseDate(value) {
 
 function todayISO() {
   return toISODate(new Date());
+}
+
+function addDays(isoDate, days) {
+  const date = parseDate(isoDate);
+  date.setDate(date.getDate() + Number(days || 0));
+  return toISODate(date);
 }
 
 function toISODate(date) {

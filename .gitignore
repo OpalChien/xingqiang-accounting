@@ -10,3 +10,4 @@ outputs/
 *.xls
 *.xlsx
 *.pdf
+.firebase/

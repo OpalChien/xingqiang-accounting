@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>興強科技記帳平台</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主選單">
+        <div class="brand-mark">興</div>
+        <button class="nav-btn active" data-view="dashboard" title="總覽">總</button>
+        <button class="nav-btn" data-view="entry" title="新增帳款">＋</button>
+        <button class="nav-btn" data-view="payments" title="已收已付">收</button>
+        <button class="nav-btn" data-view="details" title="明細查詢">明</button>
+        <button class="nav-btn" data-view="customers" title="客戶主檔">客</button>
+        <button class="nav-btn" data-view="users" title="人員權限">權</button>
+        <button class="nav-btn" data-view="excel" title="Excel">表</button>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Xingqiang Technology</p>
+            <h1>興強科技記帳平台</h1>
+            <p class="subtle">進出口帳款、ERP 客戶主檔、雲端暫存與 Excel 對帳</p>
+          </div>
+          <div class="top-actions">
+            <span id="saveStatus" class="status-chip">本機暫存</span>
+            <button id="signInBtn" class="secondary">登入 Google</button>
+            <button id="signOutBtn" class="secondary hidden">登出</button>
+          </div>
+        </header>
+
+        <section id="cloudNotice" class="notice">
+          <strong>雲端暫存：</strong>
+          登入 Google 後可把資料存到 Firebase Firestore。若 Firebase 尚未啟用 Firestore，系統仍會保留本機暫存與 Excel 下載。
+        </section>
+
+        <section id="dashboard" class="view active">
+          <div class="metrics">
+            <div class="metric"><span>應收未結</span><strong id="metricReceivable">0</strong></div>
+            <div class="metric"><span>應付未結</span><strong id="metricPayable">0</strong></div>
+            <div class="metric"><span>逾期未結</span><strong id="metricOverdue">0</strong></div>
+            <div class="metric"><span>ERP 客戶</span><strong id="metricCustomers">0</strong></div>
+          </div>
+          <div class="section-head">
+            <h2>近期帳款</h2>
+            <button class="secondary" data-view-jump="entry">新增帳款</button>
+          </div>
+          <div class="dashboard-grid">
+            <div class="chart-panel">
+              <h2>到期分布</h2>
+              <canvas id="dueChart" height="150"></canvas>
+            </div>
+            <div class="chart-panel">
+              <h2>即將到期帳款</h2>
+              <div class="table-wrap flat"><table id="upcomingTable"></table></div>
+            </div>
+          </div>
+          <div class="table-wrap"><table id="recentTable"></table></div>
+        </section>
+
+        <section id="entry" class="view">
+          <div class="section-head">
+            <h2>新增帳款</h2>
+            <button id="resetEntryBtn" class="secondary">清空表單</button>
+          </div>
+          <form id="entryForm" class="form-grid">
+            <label>
+              套用 ERP 客戶
+              <select id="customerSelect"></select>
+            </label>
+            <label>
+              客戶編號
+              <input id="customerId" placeholder="例如 CA0603N" />
+            </label>
+            <label>
+              客戶/供應商
+              <input id="counterparty" required />
+            </label>
+            <label>
+              交易日期
+              <input id="invoiceDate" type="date" required />
+            </label>
+            <label>
+              進出口
+              <select id="tradeFlow">
+                <option>出口</option>
+                <option>進口</option>
+              </select>
+            </label>
+            <label>
+              應收/應付
+              <select id="accountSide">
+                <option>應收</option>
+                <option>應付</option>
+              </select>
+            </label>
+            <label>
+              發票號碼
+              <input id="invoiceNo" />
+            </label>
+            <label>
+              幣別
+              <select id="currency">
+                <option>TWD</option><option>USD</option><option>EUR</option><option>JPY</option>
+                <option>CNY</option><option>HKD</option><option>GBP</option><option>AUD</option>
+                <option>CAD</option><option>SGD</option>
+              </select>
+            </label>
+            <label>
+              原幣金額
+              <input id="amountOriginal" type="number" min="0" step="0.01" required />
+            </label>
+            <label>
+              匯率
+              <input id="exchangeRate" type="number" min="0" step="0.0001" required />
+            </label>
+            <label>
+              結帳方式
+              <select id="settlementCycle">
+                <option>當下結</option>
+                <option selected>月結</option>
+                <option>雙月結</option>
+                <option>半年結</option>
+              </select>
+            </label>
+            <label>
+              付款天數
+              <input id="graceDays" type="number" min="0" step="1" />
+            </label>
+            <label>
+              訂單號碼
+              <input id="orderNo" />
+            </label>
+            <label>
+              提單/報關號碼
+              <input id="shipmentNo" />
+            </label>
+            <label>
+              品名/摘要
+              <input id="itemDescription" />
+            </label>
+            <label>
+              承辦人
+              <input id="owner" />
+            </label>
+            <label class="wide">
+              備註
+              <textarea id="notes" rows="3"></textarea>
+            </label>
+            <div class="form-summary">
+              <div><span>台幣金額</span><strong id="amountTwdPreview">0</strong></div>
+              <div><span>到期日</span><strong id="dueDatePreview">-</strong></div>
+              <button type="submit" class="primary">儲存帳款</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="payments" class="view">
+          <div class="section-head">
+            <h2>已收已付</h2>
+            <p class="subtle">選一筆未結帳款，押上實際收付款日期。</p>
+          </div>
+          <div class="payment-panel">
+            <label>
+              未結帳款
+              <select id="paymentRecordSelect"></select>
+            </label>
+            <label>
+              本次收/付款金額
+              <input id="paymentAmount" type="number" min="0" step="0.01" />
+            </label>
+            <label>
+              收付款日期
+              <input id="paymentDate" type="date" />
+            </label>
+            <button id="registerPaymentBtn" class="primary">登記收付款</button>
+          </div>
+          <div class="table-wrap"><table id="paidTable"></table></div>
+        </section>
+
+        <section id="details" class="view">
+          <div class="section-head">
+            <h2>明細查詢</h2>
+            <input id="detailSearch" class="search" placeholder="搜尋客戶、發票、客戶編號" />
+          </div>
+          <div class="payment-panel">
+            <label>
+              選擇要修改的帳款
+              <select id="editRecordSelect"></select>
+            </label>
+            <button id="loadRecordBtn" class="secondary">載入到表單修改</button>
+            <button id="deleteRecordBtn" class="secondary">刪除帳款</button>
+          </div>
+          <div class="table-wrap"><table id="detailTable"></table></div>
+        </section>
+
+        <section id="customers" class="view">
+          <div class="section-head">
+            <div>
+              <h2>ERP 客戶主檔</h2>
+              <p class="subtle">已內建 `Twn ERP customer data 1150706.xls` 的有效客戶清單。</p>
+            </div>
+            <button id="restoreSeedBtn" class="secondary">重載內建清單</button>
+          </div>
+          <form id="customerForm" class="form-grid compact">
+            <label>
+              選擇客戶
+              <select id="editCustomerSelect"></select>
+            </label>
+            <label>
+              客戶編號
+              <input id="editCustomerId" required />
+            </label>
+            <label class="wide">
+              客戶英文名稱
+              <input id="editEnglishName" required />
+            </label>
+            <label>
+              幣別
+              <select id="editCustomerCurrency">
+                <option>TWD</option><option>USD</option><option>EUR</option><option>JPY</option>
+                <option>CNY</option><option>HKD</option><option>GBP</option><option>AUD</option>
+                <option>CAD</option><option>SGD</option>
+              </select>
+            </label>
+            <label>
+              ERP信用天數
+              <input id="editCreditDays" type="number" min="0" step="1" />
+            </label>
+            <label>
+              結帳方式
+              <select id="editSettlementCycle">
+                <option>當下結</option>
+                <option selected>月結</option>
+                <option>雙月結</option>
+                <option>半年結</option>
+              </select>
+            </label>
+            <label>
+              付款天數
+              <input id="editGraceDays" type="number" min="0" step="1" />
+            </label>
+            <label>
+              業務
+              <input id="editSalesPerson" />
+            </label>
+            <label>
+              客戶類別
+              <input id="editBusinessType" />
+            </label>
+            <label>
+              出貨條件
+              <input id="editShipmentTerms" />
+            </label>
+            <label class="wide">
+              付款條件
+              <input id="editPaymentTerms" />
+            </label>
+            <div class="form-summary">
+              <button type="submit" class="primary">儲存客戶</button>
+              <button id="deleteCustomerBtn" type="button" class="secondary">刪除客戶</button>
+              <button id="newCustomerBtn" type="button" class="secondary">新增空白客戶</button>
+            </div>
+          </form>
+          <input id="customerSearch" class="search" placeholder="搜尋 Customer ID、英文名稱、幣別" />
+          <div class="table-wrap"><table id="customerTable"></table></div>
+        </section>
+
+        <section id="users" class="view">
+          <div class="section-head">
+            <div>
+              <h2>人員權限</h2>
+              <p class="subtle">管理員可新增員工、設定角色，並調整可執行的工作。</p>
+            </div>
+          </div>
+          <form id="userForm" class="form-grid compact">
+            <label>
+              使用者 Email
+              <input id="userEmail" type="email" required placeholder="name@example.com" />
+            </label>
+            <label>
+              角色
+              <select id="userRole">
+                <option value="employee">員工</option>
+                <option value="admin">管理員</option>
+              </select>
+            </label>
+            <div id="permissionList" class="permission-grid wide"></div>
+            <div class="form-summary">
+              <button type="submit" class="primary">儲存人員權限</button>
+              <button id="deleteUserBtn" type="button" class="secondary">刪除人員</button>
+              <button id="resetUserBtn" type="button" class="secondary">清空</button>
+            </div>
+          </form>
+          <div class="table-wrap"><table id="userTable"></table></div>
+        </section>
+
+        <section id="excel" class="view">
+          <div class="section-head">
+            <h2>Excel 匯入匯出</h2>
+            <button id="cloudSaveBtn" class="primary">儲存雲端暫存</button>
+          </div>
+          <div class="excel-actions">
+            <label class="upload-box">
+              上傳 Excel 對帳備份或 ERP 客戶主檔
+              <input id="excelUpload" type="file" accept=".xlsx,.xls" />
+            </label>
+            <button id="downloadExcelBtn" class="secondary">下載 Excel</button>
+            <button id="saveFolderBtn" class="secondary">選資料夾另存 Excel</button>
+            <button id="loadCloudBtn" class="secondary">讀取雲端暫存</button>
+          </div>
+          <div id="excelMessage" class="notice muted">Excel 會包含：對帳總表、交易明細、ERP客戶主檔、帳齡分析、結帳週期、客戶供應商。</div>
+        </section>
+      </main>
+    </div>
+
+    <template id="emptyTableTemplate">
+      <tr><td class="empty">目前沒有資料。</td></tr>
+    </template>
+
+    <div id="dueModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="dueModalTitle">
+      <div class="modal-panel">
+        <div class="section-head">
+          <div>
+            <h2 id="dueModalTitle">一週內到期提醒</h2>
+            <p class="subtle">以下帳款已逾期或 7 天內要到期，請安排收款/付款。</p>
+          </div>
+          <button id="closeDueModalBtn" class="secondary">關閉</button>
+        </div>
+        <div class="table-wrap flat"><table id="dueAlertTable"></table></div>
+      </div>
+    </div>
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

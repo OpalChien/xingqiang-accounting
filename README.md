@@ -12,6 +12,8 @@
 - 可匯入 ERP 客戶主檔 `.xls`，自動帶出客戶編號、英文名稱、幣別、月結條件與付款天數
 - 每次進入先載入上一次下載的 Excel，離開前下載當天日期命名的備份
 - SQLite 本機資料庫
+- Firebase Hosting 網頁版：內建 ERP 客戶主檔、瀏覽器本機暫存、登入後 Firebase 雲端暫存
+- 管理員/員工權限：可控管 keyin 帳款、修改/刪除帳款、登記收付款、客戶主檔維護、Excel 匯入匯出、雲端暫存
 
 ## 公司資料
 
@@ -90,3 +92,23 @@ streamlit run streamlit_app.py
 ```
 
 Streamlit Community Cloud 的檔案系統不適合作為正式長期資料庫；正式營運建議定期下載 Excel 對帳報表備份，或再接雲端資料庫。
+
+## Firebase 網頁版
+
+正式網址：
+
+```text
+https://xingqiang-accounting.web.app
+```
+
+Firebase 網頁版功能：
+
+- 已內建 `Twn ERP customer data 1150706.xls` 的 125 筆有效客戶清單。
+- 新增帳款時選客戶，會自動帶入客戶編號、英文名稱、幣別、Payment Terms/付款天數，並推算到期日。
+- Dashboard 會顯示應收/應付未結、逾期未結、到期分布圖表，以及 30 天內要到期的帳款。
+- 有帳款在 7 天內到期或已逾期時，開啟網站會跳出提醒清單。
+- 客戶主檔可在網站新增、修改、刪除。
+- Excel 可匯入/匯出，也可用 Chrome 的「選資料夾另存 Excel」。
+- 預設管理員為 `opal860526@gmail.com`；管理員登入後可到「人員權限」新增員工並勾選權限。
+
+如果 Google 登入失敗，請到 Firebase Console 的 Authentication 啟用 Google 登入提供者。

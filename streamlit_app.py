@@ -4,6 +4,7 @@ import calendar
 import io
 import json
 import os
+import re
 import sqlite3
 import uuid
 from datetime import date, datetime, timedelta
@@ -37,11 +38,13 @@ TRADE_FLOWS = ["出口", "進口"]
 ACCOUNT_SIDES = ["應收", "應付"]
 SETTLEMENT_CYCLES = ["當下結", "月結", "雙月結", "半年結"]
 CURRENCIES = ["TWD", "USD", "EUR", "JPY", "CNY", "HKD", "GBP", "AUD", "CAD", "SGD"]
+ERP_CUSTOMER_REQUIRED_COLUMNS = {"Customer ID", "English name", "Credit days", "Currency"}
 
 TABLE_COLUMNS = [
     "id",
     "trade_flow",
     "account_side",
+    "customer_id",
     "counterparty",
     "invoice_no",
     "order_no",
@@ -68,6 +71,7 @@ DISPLAY_COLUMNS = {
     "id": "ID",
     "trade_flow": "進出口",
     "account_side": "應收/應付",
+    "customer_id": "客戶編號",
     "counterparty": "客戶/供應商",
     "invoice_no": "發票號碼",
     "order_no": "訂單號碼",
@@ -102,10 +106,14 @@ IMPORT_ALIASES = {
     "trade_flow": "trade_flow",
     "應收/應付": "account_side",
     "account_side": "account_side",
+    "客戶編號": "customer_id",
+    "Customer ID": "customer_id",
+    "customer_id": "customer_id",
     "客戶/供應商": "counterparty",
     "客戶": "counterparty",
     "供應商": "counterparty",
     "counterparty": "counterparty",
+    "English name": "counterparty",
     "發票號碼": "invoice_no",
     "發票": "invoice_no",
     "invoice_no": "invoice_no",
@@ -153,6 +161,50 @@ IMPORT_ALIASES = {
     "owner": "owner",
     "備註": "notes",
     "notes": "notes",
+}
+
+CUSTOMER_ALIASES = {
+    "Customer ID": "customer_id",
+    "客戶編號": "customer_id",
+    "customer_id": "customer_id",
+    "English name": "english_name",
+    "英文名稱": "english_name",
+    "客戶英文名稱": "english_name",
+    "english_name": "english_name",
+    "Chinese name": "chinese_name",
+    "中文名稱": "chinese_name",
+    "chinese_name": "chinese_name",
+    "Currency": "currency",
+    "幣別": "currency",
+    "currency": "currency",
+    "Credit days": "credit_days",
+    "ERP信用天數": "credit_days",
+    "信用天數": "credit_days",
+    "credit_days": "credit_days",
+    "付款天數": "grace_days",
+    "grace_days": "grace_days",
+    "結帳方式": "settlement_cycle",
+    "settlement_cycle": "settlement_cycle",
+    "Payment Terms": "payment_terms",
+    "付款條件": "payment_terms",
+    "payment_terms": "payment_terms",
+    "SalesPerson": "sales_person",
+    "業務": "sales_person",
+    "sales_person": "sales_person",
+    "Bus. Type": "business_type",
+    "客戶類別": "business_type",
+    "business_type": "business_type",
+    "Shipment Terms": "shipment_terms",
+    "出貨條件": "shipment_terms",
+    "shipment_terms": "shipment_terms",
+    "Contact Person": "contact_person",
+    "聯絡人": "contact_person",
+    "contact_person": "contact_person",
+    "Phone No.": "phone",
+    "電話": "phone",
+    "phone": "phone",
+    "Email": "email",
+    "email": "email",
 }
 
 
@@ -222,21 +274,32 @@ def report_file_name() -> str:
 
 
 def render_initial_load_screen() -> None:
-    st.warning("每次開始記帳前，請先上傳上一次下載的 Excel 對帳備份。")
-    st.caption("這樣 Excel 就是主檔；系統只負責本次工作期間的新增、收款、付款與對帳。")
+    st.warning("每次開始記帳前，請先上傳上一次下載的 Excel 對帳備份；也可先載入 ERP 客戶主檔。")
+    st.caption("交易明細是每天對帳主檔；ERP 客戶主檔會用來自動帶幣別與付款天數。")
 
     col1, col2 = st.columns([1.2, 1])
     with col1:
-        uploaded = st.file_uploader("載入 Excel 對帳備份", type=["xlsx", "xls"], key="initial_excel_upload")
+        uploaded = st.file_uploader("載入 Excel 對帳備份或 ERP 客戶主檔", type=["xlsx", "xls"], key="initial_excel_upload")
         if uploaded is not None:
             try:
-                records = parse_uploaded_workbook(uploaded)
-                preview = enrich_transactions(pd.DataFrame(records))
-                st.dataframe(preview.head(10), hide_index=True, use_container_width=True)
+                payload = parse_workbook_payload(uploaded)
+                records = payload["transactions"]
+                customers = payload["customers"]
+                if records:
+                    st.markdown("**交易明細預覽**")
+                    preview = enrich_transactions(pd.DataFrame(records))
+                    st.dataframe(preview.head(10), hide_index=True, use_container_width=True)
+                if customers:
+                    st.markdown("**ERP 客戶主檔預覽**")
+                    st.dataframe(format_customer_preview(pd.DataFrame(customers).head(10)), hide_index=True, use_container_width=True)
                 if st.button("確認載入資料", type="primary", use_container_width=True):
-                    replace_transactions(records)
+                    if records:
+                        replace_transactions(records)
+                    else:
+                        replace_transactions([])
+                    replace_customers(customers)
                     mark_data_loaded()
-                    st.success(f"已載入 {len(records)} 筆資料。")
+                    st.success(f"已載入 {len(records)} 筆交易、{len(customers)} 筆 ERP 客戶資料。")
                     st.rerun()
             except Exception as exc:
                 st.error(f"載入失敗：{exc}")
@@ -250,15 +313,17 @@ def render_initial_load_screen() -> None:
             use_container_width=True,
         )
         local_df = fetch_transactions()
+        local_customers_df = fetch_customers()
         st.button(
             "載入本機暫存資料",
-            disabled=local_df.empty,
+            disabled=local_df.empty and local_customers_df.empty,
             use_container_width=True,
             on_click=mark_data_loaded,
             help="本機測試時可用；正式部署建議每次上傳 Excel 備份。",
         )
         if st.button("從空白開始", use_container_width=True):
             replace_transactions([])
+            replace_customers([])
             mark_data_loaded()
             st.rerun()
 
@@ -268,8 +333,7 @@ def render_download_reminder(raw_df: pd.DataFrame) -> None:
     inject_close_warning(should_warn)
 
     if raw_df.empty:
-        st.info("目前沒有資料。若要離開，建議先下載空白範本或確認本次沒有帳款需要保存。")
-        return
+        st.info("目前沒有交易明細。若已載入 ERP 客戶主檔，仍建議下載今日 Excel 備份。")
 
     if should_warn:
         st.warning("離開或關閉視窗前，請先下載今日 Excel 對帳備份。")
@@ -397,6 +461,7 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 trade_flow TEXT NOT NULL,
                 account_side TEXT NOT NULL,
+                customer_id TEXT,
                 counterparty TEXT NOT NULL,
                 invoice_no TEXT,
                 order_no TEXT,
@@ -420,6 +485,34 @@ def init_db() -> None:
             )
             """
         )
+        ensure_column(conn, "transactions", "customer_id", "TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS customers (
+                customer_id TEXT PRIMARY KEY,
+                english_name TEXT NOT NULL,
+                chinese_name TEXT,
+                currency TEXT NOT NULL,
+                credit_days INTEGER NOT NULL,
+                settlement_cycle TEXT NOT NULL,
+                grace_days INTEGER NOT NULL,
+                payment_terms TEXT,
+                sales_person TEXT,
+                business_type TEXT,
+                shipment_terms TEXT,
+                contact_person TEXT,
+                phone TEXT,
+                email TEXT,
+                imported_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def get_connection() -> sqlite3.Connection:
@@ -450,6 +543,134 @@ def fetch_transactions() -> pd.DataFrame:
     return df[TABLE_COLUMNS]
 
 
+def fetch_customers() -> pd.DataFrame:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM customers
+            ORDER BY english_name, customer_id
+            """
+        ).fetchall()
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "customer_id",
+                "english_name",
+                "chinese_name",
+                "currency",
+                "credit_days",
+                "settlement_cycle",
+                "grace_days",
+                "payment_terms",
+                "sales_person",
+                "business_type",
+                "shipment_terms",
+                "contact_person",
+                "phone",
+                "email",
+                "imported_at",
+            ]
+        )
+    return pd.DataFrame([dict(row) for row in rows])
+
+
+def build_customer_options(customers_df: pd.DataFrame) -> dict[str, str]:
+    options: dict[str, str] = {"手動輸入": ""}
+    if customers_df.empty:
+        return options
+
+    for _, row in customers_df.sort_values(["english_name", "customer_id"]).iterrows():
+        customer_id = clean_text(row.get("customer_id"))
+        english_name = clean_text(row.get("english_name"))
+        if not customer_id or not english_name:
+            continue
+        currency = normalize_currency(row.get("currency")) or "TWD"
+        cycle = normalize_cycle(row.get("settlement_cycle") or "月結")
+        days = int(safe_float(row.get("grace_days")))
+        options[f"{english_name} ({customer_id}) | {currency} | {cycle}+{days}天"] = customer_id
+    return options
+
+
+def get_customer_record(customers_df: pd.DataFrame, customer_id: str) -> dict[str, Any] | None:
+    if customers_df.empty or not customer_id:
+        return None
+    matches = customers_df[customers_df["customer_id"] == customer_id]
+    if matches.empty:
+        return None
+    return matches.iloc[0].to_dict()
+
+
+def replace_customers(records: list[dict[str, Any]]) -> None:
+    with get_connection() as conn:
+        conn.execute("DELETE FROM customers")
+    upsert_customers(records)
+
+
+def upsert_customers(records: list[dict[str, Any]]) -> None:
+    now = datetime.now(APP_TZ).isoformat(timespec="seconds")
+    normalized_records = []
+    for record in records:
+        customer_id = clean_text(record.get("customer_id"))
+        english_name = clean_text(record.get("english_name"))
+        if not customer_id or not english_name:
+            continue
+        credit_days = max(int(safe_float(record.get("credit_days"))), 0)
+        grace_days = int(safe_float(record.get("grace_days"), default=credit_days))
+        normalized_records.append(
+            {
+                "customer_id": customer_id,
+                "english_name": english_name,
+                "chinese_name": clean_text(record.get("chinese_name")),
+                "currency": normalize_currency(record.get("currency")),
+                "credit_days": credit_days,
+                "settlement_cycle": normalize_cycle(record.get("settlement_cycle") or "月結"),
+                "grace_days": max(grace_days, 0),
+                "payment_terms": clean_text(record.get("payment_terms")),
+                "sales_person": clean_text(record.get("sales_person")),
+                "business_type": clean_text(record.get("business_type")),
+                "shipment_terms": clean_text(record.get("shipment_terms")),
+                "contact_person": clean_text(record.get("contact_person")),
+                "phone": clean_text(record.get("phone")),
+                "email": clean_text(record.get("email")),
+                "imported_at": now,
+            }
+        )
+    if not normalized_records:
+        return
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO customers (
+                customer_id, english_name, chinese_name, currency, credit_days,
+                settlement_cycle, grace_days, payment_terms, sales_person, business_type,
+                shipment_terms, contact_person, phone, email, imported_at
+            )
+            VALUES (
+                :customer_id, :english_name, :chinese_name, :currency, :credit_days,
+                :settlement_cycle, :grace_days, :payment_terms, :sales_person, :business_type,
+                :shipment_terms, :contact_person, :phone, :email, :imported_at
+            )
+            ON CONFLICT(customer_id) DO UPDATE SET
+                english_name = excluded.english_name,
+                chinese_name = excluded.chinese_name,
+                currency = excluded.currency,
+                credit_days = excluded.credit_days,
+                settlement_cycle = excluded.settlement_cycle,
+                grace_days = excluded.grace_days,
+                payment_terms = excluded.payment_terms,
+                sales_person = excluded.sales_person,
+                business_type = excluded.business_type,
+                shipment_terms = excluded.shipment_terms,
+                contact_person = excluded.contact_person,
+                phone = excluded.phone,
+                email = excluded.email,
+                imported_at = excluded.imported_at
+            """,
+            normalized_records,
+        )
+
+
 def upsert_transaction(record: dict[str, Any]) -> str:
     now = datetime.now(APP_TZ).isoformat(timespec="seconds")
     record_id = str(record.get("id") or uuid.uuid4())
@@ -467,12 +688,13 @@ def upsert_transaction(record: dict[str, Any]) -> str:
         "id": record_id,
         "trade_flow": normalize_choice(record.get("trade_flow"), TRADE_FLOWS, "出口"),
         "account_side": normalize_choice(record.get("account_side"), ACCOUNT_SIDES, "應收"),
+        "customer_id": clean_text(record.get("customer_id")),
         "counterparty": clean_text(record.get("counterparty")) or "未命名",
         "invoice_no": clean_text(record.get("invoice_no")),
         "order_no": clean_text(record.get("order_no")),
         "shipment_no": clean_text(record.get("shipment_no")),
         "item_description": clean_text(record.get("item_description")),
-        "currency": clean_text(record.get("currency")).upper() or "TWD",
+        "currency": normalize_currency(record.get("currency")),
         "amount_original": amount_original,
         "exchange_rate": exchange_rate,
         "amount_twd": amount_twd,
@@ -498,13 +720,13 @@ def upsert_transaction(record: dict[str, Any]) -> str:
         conn.execute(
             """
             INSERT INTO transactions (
-                id, trade_flow, account_side, counterparty, invoice_no, order_no, shipment_no,
+                id, trade_flow, account_side, customer_id, counterparty, invoice_no, order_no, shipment_no,
                 item_description, currency, amount_original, exchange_rate, amount_twd,
                 settlement_cycle, invoice_date, grace_days, due_date, paid_amount_twd,
                 payment_date, bank_account, owner, notes, created_at, updated_at
             )
             VALUES (
-                :id, :trade_flow, :account_side, :counterparty, :invoice_no, :order_no, :shipment_no,
+                :id, :trade_flow, :account_side, :customer_id, :counterparty, :invoice_no, :order_no, :shipment_no,
                 :item_description, :currency, :amount_original, :exchange_rate, :amount_twd,
                 :settlement_cycle, :invoice_date, :grace_days, :due_date, :paid_amount_twd,
                 :payment_date, :bank_account, :owner, :notes, :created_at, :updated_at
@@ -512,6 +734,7 @@ def upsert_transaction(record: dict[str, Any]) -> str:
             ON CONFLICT(id) DO UPDATE SET
                 trade_flow = excluded.trade_flow,
                 account_side = excluded.account_side,
+                customer_id = excluded.customer_id,
                 counterparty = excluded.counterparty,
                 invoice_no = excluded.invoice_no,
                 order_no = excluded.order_no,
@@ -562,7 +785,7 @@ def register_payment(record_id: str, payment_amount_twd: float, payment_date_val
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def get_live_exchange_rate(currency: str) -> tuple[float, str]:
-    currency_code = clean_text(currency).upper() or "TWD"
+    currency_code = normalize_currency(currency)
     if currency_code == "TWD":
         return 1.0, "TWD"
 
@@ -951,6 +1174,52 @@ def render_simple_transaction_form(existing: dict[str, Any] | None, form_key: st
     st.markdown("#### 簡化記帳")
     st.caption("先填對帳一定會用到的資料；訂單、提單、承辦人等細節可放到進階欄位。")
 
+    customers_df = fetch_customers()
+    customer_id_default = clean_text(existing.get("customer_id"))
+    selected_customer: dict[str, Any] | None = None
+    selected_customer_id = customer_id_default
+    if not customers_df.empty:
+        customer_options = build_customer_options(customers_df)
+        option_labels = list(customer_options.keys())
+        default_label = next(
+            (label for label, customer_id in customer_options.items() if customer_id == customer_id_default),
+            "手動輸入",
+        )
+        selected_label = st.selectbox(
+            "套用 ERP 客戶資料",
+            option_labels,
+            index=option_labels.index(default_label) if default_label in option_labels else 0,
+            key=f"{prefix}_customer_picker",
+        )
+        selected_customer_id = customer_options[selected_label]
+        selected_customer = get_customer_record(customers_df, selected_customer_id)
+        if selected_customer:
+            st.caption(
+                "ERP 客戶條件："
+                f"{selected_customer_id} | "
+                f"{normalize_currency(selected_customer.get('currency'))} | "
+                f"{normalize_cycle(selected_customer.get('settlement_cycle'))}+"
+                f"{int(safe_float(selected_customer.get('grace_days')))}天"
+            )
+
+    counterparty_default = (
+        clean_text(selected_customer.get("english_name")) if selected_customer else clean_text(existing.get("counterparty"))
+    )
+    currency_default = normalize_currency(
+        selected_customer.get("currency") if selected_customer else (clean_text(existing.get("currency")) or "TWD")
+    )
+    settlement_default = (
+        normalize_cycle(selected_customer.get("settlement_cycle")) if selected_customer else normalize_cycle(existing.get("settlement_cycle"))
+    )
+    grace_days_default = int(
+        safe_float(
+            selected_customer.get("grace_days") if selected_customer else existing.get("grace_days"),
+            default=0,
+        )
+    )
+    owner_default = clean_text(selected_customer.get("sales_person")) if selected_customer else clean_text(existing.get("owner"))
+    customer_key_part = selected_customer_id or "manual"
+
     basic_col, amount_col, settlement_col = st.columns(3)
     with basic_col:
         invoice_date = st.date_input(
@@ -971,10 +1240,16 @@ def render_simple_transaction_form(existing: dict[str, Any] | None, form_key: st
             index=index_of(ACCOUNT_SIDES, existing.get("account_side"), ACCOUNT_SIDES.index(default_side)),
             key=f"{prefix}_account_side",
         )
+        customer_id_value = st.text_input(
+            "客戶編號",
+            value=selected_customer_id,
+            key=f"{prefix}_{customer_key_part}_customer_id",
+            disabled=selected_customer is not None,
+        )
         counterparty = st.text_input(
             "客戶/供應商",
-            value=clean_text(existing.get("counterparty")),
-            key=f"{prefix}_counterparty",
+            value=counterparty_default,
+            key=f"{prefix}_{customer_key_part}_counterparty",
         )
         invoice_no = st.text_input(
             "發票號碼",
@@ -983,13 +1258,12 @@ def render_simple_transaction_form(existing: dict[str, Any] | None, form_key: st
         )
 
     with amount_col:
-        currency_default = clean_text(existing.get("currency")).upper() or "TWD"
         currency_options = CURRENCIES if currency_default in CURRENCIES else [currency_default] + CURRENCIES
         currency = st.selectbox(
             "幣別",
             currency_options,
             index=0 if currency_default not in CURRENCIES else CURRENCIES.index(currency_default),
-            key=f"{prefix}_currency",
+            key=f"{prefix}_{customer_key_part}_currency",
         )
         amount_original = st.number_input(
             "原幣金額",
@@ -1034,15 +1308,15 @@ def render_simple_transaction_form(existing: dict[str, Any] | None, form_key: st
         settlement_cycle = st.selectbox(
             "結帳方式",
             SETTLEMENT_CYCLES,
-            index=index_of(SETTLEMENT_CYCLES, existing.get("settlement_cycle"), 1),
-            key=f"{prefix}_settlement_cycle",
+            index=index_of(SETTLEMENT_CYCLES, settlement_default, 1),
+            key=f"{prefix}_{customer_key_part}_settlement_cycle",
         )
         grace_days = st.number_input(
             "付款天數",
             min_value=0,
-            value=int(existing.get("grace_days") or 0),
+            value=max(grace_days_default, 0),
             step=1,
-            key=f"{prefix}_grace_days",
+            key=f"{prefix}_{customer_key_part}_grace_days",
         )
         projected_due = calculate_due_date(invoice_date, settlement_cycle, int(grace_days))
         st.metric("到期日", projected_due.isoformat())
@@ -1070,7 +1344,7 @@ def render_simple_transaction_form(existing: dict[str, Any] | None, form_key: st
                 value=clean_text(existing.get("item_description")),
                 key=f"{prefix}_item_description",
             )
-            owner = st.text_input("承辦人", value=clean_text(existing.get("owner")), key=f"{prefix}_owner")
+            owner = st.text_input("承辦人", value=owner_default, key=f"{prefix}_{customer_key_part}_owner")
         with adv2:
             bank_account = st.text_input(
                 "銀行/帳戶",
@@ -1103,6 +1377,7 @@ def render_simple_transaction_form(existing: dict[str, Any] | None, form_key: st
                 "id": existing.get("id"),
                 "trade_flow": trade_flow,
                 "account_side": account_side,
+                "customer_id": customer_id_value,
                 "counterparty": counterparty,
                 "invoice_no": invoice_no,
                 "order_no": order_no,
@@ -1136,6 +1411,7 @@ def render_simple_detail_table(df: pd.DataFrame) -> None:
         "狀態",
         "進出口",
         "應收/應付",
+        "客戶編號",
         "客戶/供應商",
         "發票號碼",
         "幣別",
@@ -1196,7 +1472,12 @@ def render_payment_records(raw_df: pd.DataFrame) -> None:
                 st.metric("帳款類型", selected_display["應收/應付"])
                 st.metric("未結金額", money(outstanding_amount))
             with col2:
-                st.metric("客戶/供應商", selected_display["客戶/供應商"])
+                customer_label = clean_text(selected_display.get("客戶編號"))
+                if customer_label:
+                    customer_label = f"{customer_label} / {selected_display['客戶/供應商']}"
+                else:
+                    customer_label = selected_display["客戶/供應商"]
+                st.metric("客戶/供應商", customer_label)
                 st.metric("到期日", selected_display["到期日"].date().isoformat() if pd.notna(selected_display["到期日"]) else "")
             with col3:
                 st.metric("結帳方式", selected_display["結帳方式"])
@@ -1233,6 +1514,7 @@ def render_payment_records(raw_df: pd.DataFrame) -> None:
         visible_cols = [
             "狀態",
             "應收/應付",
+            "客戶編號",
             "客戶/供應商",
             "發票號碼",
             "收付款日期",
@@ -1258,8 +1540,10 @@ def build_payment_options(df: pd.DataFrame) -> dict[str, str]:
     for _, row in df.sort_values(["到期日", "客戶/供應商"]).iterrows():
         due = row["到期日"].date().isoformat() if pd.notna(row["到期日"]) else ""
         invoice_no = clean_text(row.get("發票號碼")) or "無發票"
+        customer_id = clean_text(row.get("客戶編號"))
+        party = f"{customer_id} {row['客戶/供應商']}" if customer_id else row["客戶/供應商"]
         label = (
-            f"{due} | {row['應收/應付']} | {row['客戶/供應商']} | "
+            f"{due} | {row['應收/應付']} | {party} | "
             f"{invoice_no} | 未結 {money(row['未結金額'])}"
         )
         options[label] = row["ID"]
@@ -1270,9 +1554,11 @@ def build_record_options(df: pd.DataFrame) -> dict[str, str]:
     options: dict[str, str] = {}
     enriched = enrich_transactions(df)
     for _, row in enriched.iterrows():
+        customer_id = clean_text(row.get("客戶編號"))
+        party = f"{customer_id} {row['客戶/供應商']}" if customer_id else row["客戶/供應商"]
         label = (
             f"{row['交易日期'].date() if pd.notna(row['交易日期']) else ''} | "
-            f"{row['客戶/供應商']} | {row['發票號碼'] or '無發票'} | "
+            f"{party} | {row['發票號碼'] or '無發票'} | "
             f"{row['應收/應付']} {money(row['未結金額'])}"
         )
         options[label] = row["ID"]
@@ -1289,6 +1575,7 @@ def render_detail_table(df: pd.DataFrame) -> None:
         "狀態",
         "進出口",
         "應收/應付",
+        "客戶編號",
         "客戶/供應商",
         "發票號碼",
         "訂單號碼",
@@ -1336,13 +1623,14 @@ def render_excel_tools(raw_df: pd.DataFrame) -> None:
         )
     with col2:
         report_df = enrich_transactions(raw_df)
+        customers_df = fetch_customers()
         st.download_button(
             "下載完整對帳 Excel",
             data=build_report_workbook(report_df),
             file_name=report_file_name(),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
-            disabled=report_df.empty,
+            disabled=report_df.empty and customers_df.empty,
             on_click=mark_data_downloaded,
         )
 
@@ -1351,19 +1639,115 @@ def render_excel_tools(raw_df: pd.DataFrame) -> None:
     import_mode = st.radio("匯入模式", ["追加或更新", "取代全部資料"], horizontal=True)
     if uploaded is not None:
         try:
-            records = parse_uploaded_workbook(uploaded)
-            preview = enrich_transactions(pd.DataFrame(records))
-            st.dataframe(preview.head(20), hide_index=True, use_container_width=True)
+            payload = parse_workbook_payload(uploaded)
+            records = payload["transactions"]
+            customers = payload["customers"]
+            if records:
+                st.markdown("**交易明細預覽**")
+                preview = enrich_transactions(pd.DataFrame(records))
+                st.dataframe(preview.head(20), hide_index=True, use_container_width=True)
+            if customers:
+                st.markdown("**ERP 客戶主檔預覽**")
+                st.dataframe(format_customer_preview(pd.DataFrame(customers).head(20)), hide_index=True, use_container_width=True)
             if st.button("確認匯入", type="primary"):
-                if import_mode == "取代全部資料":
-                    replace_transactions(records)
-                else:
-                    append_transactions(records)
+                if records:
+                    if import_mode == "取代全部資料":
+                        replace_transactions(records)
+                    else:
+                        append_transactions(records)
+                if customers:
+                    replace_customers(customers)
                 mark_data_changed()
-                st.success(f"已匯入 {len(records)} 筆資料。")
+                st.success(f"已匯入 {len(records)} 筆交易、{len(customers)} 筆 ERP 客戶資料。")
                 st.rerun()
         except Exception as exc:
             st.error(f"匯入失敗：{exc}")
+
+
+def read_upload_bytes(uploaded_file: Any) -> bytes:
+    if isinstance(uploaded_file, (str, Path)):
+        return Path(uploaded_file).read_bytes()
+    if hasattr(uploaded_file, "getvalue"):
+        return uploaded_file.getvalue()
+    if hasattr(uploaded_file, "read"):
+        position = uploaded_file.tell() if hasattr(uploaded_file, "tell") else None
+        data = uploaded_file.read()
+        if position is not None and hasattr(uploaded_file, "seek"):
+            uploaded_file.seek(position)
+        return data
+    raise ValueError("無法讀取上傳檔案。")
+
+
+def parse_workbook_payload(uploaded_file: Any) -> dict[str, list[dict[str, Any]]]:
+    data = read_upload_bytes(uploaded_file)
+    transactions: list[dict[str, Any]] = []
+    customers: list[dict[str, Any]] = []
+
+    try:
+        transactions = parse_uploaded_workbook(io.BytesIO(data))
+    except Exception:
+        transactions = []
+
+    try:
+        customers = parse_customer_workbook(io.BytesIO(data))
+    except Exception:
+        customers = []
+
+    if not transactions and not customers:
+        raise ValueError("這份 Excel 沒有可匯入的交易明細，也不是可辨識的 ERP 客戶主檔。")
+    return {"transactions": transactions, "customers": customers}
+
+
+def parse_customer_workbook(uploaded_file: Any) -> list[dict[str, Any]]:
+    workbook = pd.ExcelFile(uploaded_file)
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for sheet_name in workbook.sheet_names:
+        df = pd.read_excel(workbook, sheet_name=sheet_name, dtype=object)
+        df = df.dropna(how="all")
+        if df.empty:
+            continue
+        normalized_columns = {}
+        for col in df.columns:
+            key = clean_text(col)
+            if key in CUSTOMER_ALIASES:
+                normalized_columns[col] = CUSTOMER_ALIASES[key]
+        normalized = df.rename(columns=normalized_columns)
+        if not {"customer_id", "english_name"}.issubset(set(normalized.columns)):
+            continue
+
+        for _, row in normalized.iterrows():
+            customer_id = clean_text(row.get("customer_id"))
+            english_name = clean_text(row.get("english_name"))
+            if not customer_id or not english_name or customer_id in seen:
+                continue
+            credit_days = int(safe_float(row.get("credit_days")))
+            grace_days = int(safe_float(row.get("grace_days"), default=-1))
+            if grace_days < 0:
+                grace_days = infer_grace_days_from_terms(row.get("payment_terms"), credit_days)
+            settlement_cycle = normalize_cycle(row.get("settlement_cycle") or ("當下結" if grace_days <= 0 else "月結"))
+            records.append(
+                {
+                    "customer_id": customer_id,
+                    "english_name": english_name,
+                    "chinese_name": clean_text(row.get("chinese_name")),
+                    "currency": normalize_currency(row.get("currency")),
+                    "credit_days": credit_days,
+                    "settlement_cycle": settlement_cycle,
+                    "grace_days": grace_days,
+                    "payment_terms": clean_text(row.get("payment_terms")),
+                    "sales_person": clean_text(row.get("sales_person")),
+                    "business_type": clean_text(row.get("business_type")),
+                    "shipment_terms": clean_text(row.get("shipment_terms")),
+                    "contact_person": clean_text(row.get("contact_person")),
+                    "phone": clean_text(row.get("phone")),
+                    "email": clean_text(row.get("email")),
+                }
+            )
+            seen.add(customer_id)
+
+    return records
 
 
 def parse_uploaded_workbook(uploaded_file: Any) -> list[dict[str, Any]]:
@@ -1410,12 +1794,13 @@ def parse_uploaded_workbook(uploaded_file: Any) -> list[dict[str, Any]]:
                 "id": clean_text(row.get("id")) or str(uuid.uuid4()),
                 "trade_flow": trade_flow,
                 "account_side": normalize_choice(row.get("account_side"), ACCOUNT_SIDES, default_side),
+                "customer_id": clean_text(row.get("customer_id")),
                 "counterparty": clean_text(row.get("counterparty")) or "未命名",
                 "invoice_no": clean_text(row.get("invoice_no")),
                 "order_no": clean_text(row.get("order_no")),
                 "shipment_no": clean_text(row.get("shipment_no")),
                 "item_description": clean_text(row.get("item_description")),
-                "currency": clean_text(row.get("currency")).upper() or "TWD",
+                "currency": normalize_currency(row.get("currency")),
                 "amount_original": amount_original,
                 "exchange_rate": exchange_rate,
                 "settlement_cycle": settlement_cycle,
@@ -1437,6 +1822,7 @@ def build_template_workbook() -> bytes:
     columns = [
         "進出口",
         "應收/應付",
+        "客戶編號",
         "客戶/供應商",
         "發票號碼",
         "訂單號碼",
@@ -1459,6 +1845,7 @@ def build_template_workbook() -> bytes:
         [
             ["進出口", "出口或進口"],
             ["應收/應付", "出口通常是應收，進口通常是應付，可依實際情況調整"],
+            ["客戶編號", "可填 ERP Customer ID；若先匯入 ERP 客戶主檔，新增帳款時可自動帶入"],
             ["結帳方式", "當下結、月結、雙月結、半年結"],
             ["付款天數", "結帳日後再加幾天付款，例如月結 30 天填 30"],
             ["匯率", "台幣金額會以原幣金額乘以匯率計算"],
@@ -1466,23 +1853,90 @@ def build_template_workbook() -> bytes:
         ],
         columns=["欄位", "說明"],
     )
+    customer_template = pd.DataFrame(
+        columns=[
+            "客戶編號",
+            "客戶英文名稱",
+            "中文名稱",
+            "幣別",
+            "ERP信用天數",
+            "結帳方式",
+            "付款天數",
+            "付款條件",
+            "業務",
+            "客戶類別",
+            "出貨條件",
+            "聯絡人",
+            "電話",
+            "Email",
+        ]
+    )
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         template.to_excel(writer, sheet_name="交易明細", index=False)
+        customer_template.to_excel(writer, sheet_name="ERP客戶主檔", index=False)
         field_notes.to_excel(writer, sheet_name="欄位說明", index=False)
         apply_workbook_style(writer.book)
     return output.getvalue()
 
 
+def customer_export_frame(customers: pd.DataFrame | None = None) -> pd.DataFrame:
+    customers_df = fetch_customers() if customers is None else customers.copy()
+    export_columns = {
+        "customer_id": "客戶編號",
+        "english_name": "客戶英文名稱",
+        "chinese_name": "中文名稱",
+        "currency": "幣別",
+        "credit_days": "ERP信用天數",
+        "settlement_cycle": "結帳方式",
+        "grace_days": "付款天數",
+        "payment_terms": "付款條件",
+        "sales_person": "業務",
+        "business_type": "客戶類別",
+        "shipment_terms": "出貨條件",
+        "contact_person": "聯絡人",
+        "phone": "電話",
+        "email": "Email",
+        "imported_at": "匯入時間",
+    }
+    ordered = list(export_columns.values())
+    if customers_df.empty:
+        return pd.DataFrame(columns=ordered)
+
+    for col in export_columns:
+        if col not in customers_df.columns:
+            customers_df[col] = ""
+    customers_df["currency"] = customers_df["currency"].apply(normalize_currency)
+    customers_df["settlement_cycle"] = customers_df["settlement_cycle"].apply(normalize_cycle)
+    customers_df["credit_days"] = pd.to_numeric(customers_df["credit_days"], errors="coerce").fillna(0).astype(int)
+    customers_df["grace_days"] = pd.to_numeric(customers_df["grace_days"], errors="coerce").fillna(0).astype(int)
+    renamed = customers_df.rename(columns=export_columns)
+    return renamed[ordered]
+
+
 def build_report_workbook(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
+    customers = customer_export_frame()
     if df.empty:
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            pd.DataFrame(columns=["目前沒有資料"]).to_excel(writer, sheet_name="交易明細", index=False)
+            pd.DataFrame(
+                [
+                    ["公司名稱", COMPANY_NAME, ""],
+                    ["報表日期", today().isoformat(), ""],
+                    ["交易筆數", 0, "目前沒有交易明細"],
+                    ["ERP客戶筆數", len(customers), "已載入的客戶主檔會保留在 ERP客戶主檔 工作表"],
+                ],
+                columns=["項目", "數值", "說明"],
+            ).to_excel(writer, sheet_name="對帳總表", index=False)
+            pd.DataFrame(columns=list(DISPLAY_COLUMNS.values())).to_excel(writer, sheet_name="交易明細", index=False)
+            customers.to_excel(writer, sheet_name="ERP客戶主檔", index=False)
             apply_workbook_style(writer.book)
         return output.getvalue()
 
     report = make_excel_safe(df.copy())
+    for text_col in ["客戶編號", "客戶/供應商"]:
+        if text_col in report.columns:
+            report[text_col] = report[text_col].fillna("")
     summary = build_reconciliation_summary(report)
     aging = (
         report.pivot_table(
@@ -1506,7 +1960,7 @@ def build_report_workbook(df: pd.DataFrame) -> bytes:
     )
     counterparty = (
         report.pivot_table(
-            index=["客戶/供應商", "應收/應付"],
+            index=["客戶編號", "客戶/供應商", "應收/應付"],
             values=["台幣金額", "已收/已付金額", "未結金額"],
             aggfunc="sum",
             fill_value=0,
@@ -1518,6 +1972,7 @@ def build_report_workbook(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         summary.to_excel(writer, sheet_name="對帳總表", index=False)
         report.to_excel(writer, sheet_name="交易明細", index=False)
+        customers.to_excel(writer, sheet_name="ERP客戶主檔", index=False)
         aging.to_excel(writer, sheet_name="帳齡分析", index=False)
         cycle.to_excel(writer, sheet_name="結帳週期", index=False)
         counterparty.to_excel(writer, sheet_name="客戶供應商", index=False)
@@ -1590,7 +2045,7 @@ def apply_workbook_style(workbook: Any) -> None:
             if header in money_headers:
                 for cell in column_cells[1:]:
                     cell.number_format = '#,##0.00'
-            if "日期" in str(header) or header in {"交易日期", "到期日", "收付款日期", "建立時間", "更新時間"}:
+            if "日期" in str(header) or header in {"交易日期", "到期日", "收付款日期", "建立時間", "更新時間", "匯入時間"}:
                 for cell in column_cells[1:]:
                     cell.number_format = "yyyy-mm-dd"
 
@@ -1702,6 +2157,26 @@ def format_money_columns(df: pd.DataFrame) -> pd.DataFrame:
     return formatted
 
 
+def format_customer_preview(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    renamed = df.rename(
+        columns={
+            "customer_id": "客戶編號",
+            "english_name": "客戶英文名稱",
+            "currency": "幣別",
+            "credit_days": "ERP信用天數",
+            "settlement_cycle": "結帳方式",
+            "grace_days": "付款天數",
+            "payment_terms": "付款條件",
+            "sales_person": "業務",
+            "business_type": "客戶類別",
+        }
+    )
+    cols = ["客戶編號", "客戶英文名稱", "幣別", "ERP信用天數", "結帳方式", "付款天數", "付款條件", "業務", "客戶類別"]
+    return renamed[[col for col in cols if col in renamed.columns]]
+
+
 def money(value: Any) -> str:
     return f"{safe_float(value):,.0f}"
 
@@ -1758,6 +2233,28 @@ def normalize_cycle(value: Any) -> str:
     }
     cleaned = aliases.get(cleaned, cleaned)
     return cleaned if cleaned in SETTLEMENT_CYCLES else "月結"
+
+
+def normalize_currency(value: Any) -> str:
+    cleaned = clean_text(value).upper()
+    aliases = {
+        "NTD": "TWD",
+        "NT": "TWD",
+        "RMB": "CNY",
+        "人民幣": "CNY",
+        "台幣": "TWD",
+        "新台幣": "TWD",
+    }
+    normalized = aliases.get(cleaned, cleaned)
+    return normalized if normalized in CURRENCIES else "TWD"
+
+
+def infer_grace_days_from_terms(payment_terms: Any, credit_days: Any) -> int:
+    text = clean_text(payment_terms)
+    numbers = [int(match) for match in re.findall(r"\d+", text)]
+    if numbers:
+        return max(numbers)
+    return max(int(safe_float(credit_days)), 0)
 
 
 def index_of(options: list[str], value: Any, fallback: int) -> int:

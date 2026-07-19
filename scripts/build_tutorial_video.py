@@ -28,8 +28,9 @@ def font(size, bold=False):
 
 
 TITLE = font(54, True)
+STEP_TITLE = font(44, True)
 SUBTITLE = font(32)
-BODY = font(30)
+BODY = font(28)
 SMALL = font(24)
 TAG = font(26, True)
 
@@ -108,19 +109,43 @@ def rounded_rect(draw, xy, radius, fill, outline=None, width=1):
     draw.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width)
 
 
+def wrap_text(draw, text, text_font, max_width):
+    lines = []
+    current = ""
+    for char in str(text):
+        candidate = current + char
+        if not current or draw.textlength(candidate, font=text_font) <= max_width:
+            current = candidate
+            continue
+        lines.append(current.rstrip())
+        current = char.lstrip()
+    if current:
+        lines.append(current.rstrip())
+    return lines
+
+
+def draw_wrapped(draw, xy, text, text_font, fill, max_width, line_gap=8):
+    x, y = xy
+    line_height = text_font.size + line_gap
+    for line in wrap_text(draw, text, text_font, max_width):
+        draw.text((x, y), line, font=text_font, fill=fill)
+        y += line_height
+    return y
+
+
 def draw_text_block(draw, x, y, title, bullets, step=None):
+    inner_right = 690
     if step:
         rounded_rect(draw, (x, y, x + 84, y + 58), 12, "#0f4b42")
         draw.text((x + 28, y + 10), step, font=TAG, fill="white")
         x_title = x + 110
     else:
         x_title = x
-    draw.text((x_title, y - 2), title, font=TITLE, fill="#10211e")
-    by = y + 82
+    title_bottom = draw_wrapped(draw, (x_title, y - 2), title, STEP_TITLE, "#10211e", inner_right - x_title, 10)
+    by = max(y + 82, title_bottom + 22)
     for bullet in bullets:
         draw.ellipse((x + 4, by + 12, x + 16, by + 24), fill="#bc7410")
-        draw.text((x + 32, by), bullet, font=BODY, fill="#263633")
-        by += 52
+        by = draw_wrapped(draw, (x + 32, by), bullet, BODY, "#263633", inner_right - x - 32, 8) + 16
 
 
 def make_slide(spec):
@@ -135,25 +160,24 @@ def make_slide(spec):
         rounded_rect(draw, (520, 280, 1810, 1020), 18, "#ffffff", "#d8e0da", 2)
         frame.paste(screenshot, (535, 295))
         rounded_rect(draw, (90, 90, 720, 835), 18, "#ffffff", "#d8e0da", 2)
-        draw.text((130, 135), spec["title"], font=TITLE, fill="#10211e")
-        draw.text((130, 215), spec["subtitle"], font=SUBTITLE, fill="#4a5b57")
-        y = 330
+        draw_wrapped(draw, (130, 135), spec["title"], TITLE, "#10211e", 545, 10)
+        subtitle_bottom = draw_wrapped(draw, (130, 225), spec["subtitle"], SUBTITLE, "#4a5b57", 540, 8)
+        y = max(330, subtitle_bottom + 50)
         for bullet in spec["bullets"]:
             draw.ellipse((135, y + 12, 149, y + 26), fill="#bc7410")
-            draw.text((170, y), bullet, font=BODY, fill="#263633")
-            y += 62
+            y = draw_wrapped(draw, (170, y), bullet, BODY, "#263633", 500, 8) + 18
         draw.text((130, 745), "網址：https://xingqiang-accounting.web.app", font=SMALL, fill="#0f4b42")
         return frame
 
     if spec.get("kind") == "closing":
         rounded_rect(draw, (250, 130, 1670, 890), 22, "#ffffff", "#d8e0da", 2)
-        draw.text((315, 215), spec["title"], font=TITLE, fill="#10211e")
+        draw_wrapped(draw, (315, 215), spec["title"], TITLE, "#10211e", 1240, 10)
         y = 335
         for i, bullet in enumerate(spec["bullets"], start=1):
             rounded_rect(draw, (320, y - 4, 380, y + 56), 10, "#0f4b42")
             draw.text((340, y + 6), str(i), font=TAG, fill="white")
-            draw.text((410, y + 4), bullet, font=SUBTITLE, fill="#263633")
-            y += 96
+            next_y = draw_wrapped(draw, (410, y + 4), bullet, SUBTITLE, "#263633", 1080, 8)
+            y = max(y + 96, next_y + 24)
         draw.text((315, 790), "提醒：關閉網站前，先下載一份 Excel 備份。", font=BODY, fill="#bc3a3a")
         return frame
 

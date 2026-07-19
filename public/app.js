@@ -48,6 +48,7 @@ const state = {
   profile: null,
   user: null,
   cloudReady: false,
+  cloudBusy: false,
   dirty: false,
   editingTransactionId: "",
 };
@@ -70,7 +71,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadLocalOrSeed();
   setDefaultDates();
   renderAll();
-  updateSaveStatus("公開使用");
+  updateSaveStatus("正在讀取雲端...");
+  await loadCloud({ silent: true });
 
   window.addEventListener("beforeunload", (event) => {
     event.preventDefault();
@@ -378,8 +380,8 @@ function applyPermissions() {
   $("registerPaymentBtn").disabled = !can("recordPayments");
   $("loadRecordBtn").disabled = !can("editTransactions");
   $("deleteRecordBtn").disabled = !can("deleteTransactions");
-  $("cloudSaveBtn").disabled = !can("cloudSync");
-  $("loadCloudBtn").disabled = !can("cloudSync");
+  $("cloudSaveBtn").disabled = state.cloudBusy || !can("cloudSync");
+  $("loadCloudBtn").disabled = state.cloudBusy || !can("cloudSync");
   $("excelUpload").disabled = !can("importExportExcel");
   $("downloadExcelBtn").disabled = !can("importExportExcel");
   $("saveFolderBtn").disabled = !can("importExportExcel");
@@ -418,34 +420,66 @@ async function saveCloud() {
     showNotice("你目前沒有雲端暫存的權限。");
     return;
   }
-  try {
-    await replaceCloudCollection("customers", state.customers, "customer_id");
-    await replaceCloudCollection("transactions", state.transactions, "id");
-    state.dirty = false;
-    updateSaveStatus(`雲端已儲存：${new Date().toLocaleString("zh-TW")}`);
-    showNotice("已儲存到 Firebase 雲端暫存。", "muted");
-  } catch (error) {
-    showNotice(`雲端儲存失敗：${friendlyFirebaseError(error)}`);
-  }
+  await runCloudAction("cloudSaveBtn", "儲存中...", async () => {
+    updateSaveStatus("正在儲存雲端...");
+    try {
+      await replaceCloudCollection("customers", state.customers, "customer_id");
+      await replaceCloudCollection("transactions", state.transactions, "id");
+      const counts = await refreshFromCloud();
+      state.dirty = false;
+      updateSaveStatus(`雲端已儲存：${new Date().toLocaleString("zh-TW")}`);
+      showNotice(`已儲存並重新讀回 Firebase：${counts.customers} 筆客戶、${counts.transactions} 筆帳款。`, "muted");
+    } catch (error) {
+      updateSaveStatus("雲端儲存失敗");
+      showNotice(`雲端儲存失敗：${friendlyFirebaseError(error)}`);
+    }
+  });
 }
 
-async function loadCloud() {
+async function loadCloud(options = {}) {
   if (!can("cloudSync")) {
     showNotice("你目前沒有讀取雲端暫存的權限。");
     return;
   }
+  await runCloudAction("loadCloudBtn", "讀取中...", async () => {
+    updateSaveStatus("正在讀取雲端...");
+    try {
+      const counts = await refreshFromCloud();
+      updateSaveStatus(`雲端已讀取：${new Date().toLocaleString("zh-TW")}`);
+      if (!options.silent) {
+        showNotice(`已讀取 Firebase 最新資料：${counts.customers} 筆客戶、${counts.transactions} 筆帳款。`, "muted");
+      }
+    } catch (error) {
+      updateSaveStatus(options.silent ? "本機暫存" : "讀取雲端失敗");
+      showNotice(`讀取雲端失敗，先保留目前本機資料：${friendlyFirebaseError(error)}`);
+    }
+  });
+}
+
+async function runCloudAction(buttonId, busyLabel, action) {
+  if (state.cloudBusy) return;
+  const button = $(buttonId);
+  const originalText = button?.textContent || "";
+  state.cloudBusy = true;
+  if (button) button.textContent = busyLabel;
+  applyPermissions();
   try {
-    const [customers, transactions] = await Promise.all([readCloudCollection("customers"), readCloudCollection("transactions")]);
-    state.customers = customers.length ? customers.map(normalizeCustomer) : await fetchSeedCustomers();
-    state.transactions = transactions.length ? transactions : buildDemoTransactions();
-    persistLocal(false);
-    state.dirty = false;
-    renderAll();
-    updateSaveStatus("已讀取雲端暫存");
-    showNotice("已讀取 Firebase 雲端暫存。", "muted");
-  } catch (error) {
-    showNotice(`讀取雲端失敗：${friendlyFirebaseError(error)}`);
+    await action();
+  } finally {
+    state.cloudBusy = false;
+    if (button) button.textContent = originalText;
+    applyPermissions();
   }
+}
+
+async function refreshFromCloud() {
+  const [customers, transactions] = await Promise.all([readCloudCollection("customers"), readCloudCollection("transactions")]);
+  state.customers = customers.length ? customers.map(normalizeCustomer) : await fetchSeedCustomers();
+  state.transactions = transactions.length ? transactions : buildDemoTransactions();
+  persistLocal(false);
+  state.dirty = false;
+  renderAll();
+  return { customers: state.customers.length, transactions: state.transactions.length };
 }
 
 async function replaceCloudCollection(collectionName, rows, idField) {
@@ -478,8 +512,13 @@ async function replaceCloudCollection(collectionName, rows, idField) {
 }
 
 async function readCloudCollection(collectionName) {
-  const snapshot = await db.collection("accounts").doc("xingqiang").collection(collectionName).get();
-  return snapshot.docs.map((doc) => doc.data());
+  const snapshot = await db.collection("accounts").doc("xingqiang").collection(collectionName).get({ source: "server" });
+  return snapshot.docs.map((doc) => {
+    const data = doc.data();
+    if (collectionName === "customers" && !data.customer_id) data.customer_id = doc.id;
+    if (collectionName === "transactions" && !data.id) data.id = doc.id;
+    return data;
+  });
 }
 
 function renderAll() {

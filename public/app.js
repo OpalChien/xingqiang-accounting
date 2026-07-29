@@ -40,6 +40,7 @@ let auth;
 let db;
 let unsubscribeAuth;
 let dueChart;
+let autoSaveTimer;
 
 const state = {
   customers: [],
@@ -50,6 +51,7 @@ const state = {
   cloudReady: false,
   cloudBusy: false,
   dirty: false,
+  changeVersion: 0,
   editingTransactionId: "",
 };
 
@@ -122,6 +124,18 @@ function bindAuth() {
 function bindEntryForm() {
   $("tradeFlow").addEventListener("change", () => {
     $("accountSide").value = $("tradeFlow").value === "出口" ? "應收" : "應付";
+    updateReceivedGoodsControls();
+    updateEntryPreview();
+  });
+
+  $("accountSide").addEventListener("change", () => {
+    updateReceivedGoodsControls();
+    updateEntryPreview();
+  });
+
+  $("useReceivedDateForDue").addEventListener("change", () => {
+    updateReceivedGoodsControls();
+    updateEntryPreview();
   });
 
   $("customerSelect").addEventListener("change", async () => {
@@ -147,7 +161,7 @@ function bindEntryForm() {
     updateEntryPreview();
   });
 
-  ["invoiceDate", "amountOriginal", "exchangeRate", "settlementCycle", "graceDays"].forEach((id) => {
+  ["invoiceDate", "goodsReceivedDate", "amountOriginal", "exchangeRate", "settlementCycle", "graceDays"].forEach((id) => {
     $(id).addEventListener("input", updateEntryPreview);
   });
 
@@ -171,6 +185,12 @@ function bindEntryForm() {
     }
 
     const existing = state.transactions.find((item) => item.id === state.editingTransactionId);
+    const useReceivedDateForDue = isImportPayable() && $("useReceivedDateForDue").checked;
+    const goodsReceivedDate = useReceivedDateForDue ? $("goodsReceivedDate").value : "";
+    if (useReceivedDateForDue && !goodsReceivedDate) {
+      showNotice("進口應付選擇收貨日起算時，請填寫收貨日期。");
+      return;
+    }
     const record = {
       id: existing?.id || crypto.randomUUID(),
       trade_flow: $("tradeFlow").value,
@@ -187,6 +207,8 @@ function bindEntryForm() {
       settlement_cycle: normalizeCycle($("settlementCycle").value),
       invoice_date: $("invoiceDate").value,
       grace_days: Number($("graceDays").value || 0),
+      use_received_date_for_due: useReceivedDateForDue,
+      goods_received_date: goodsReceivedDate,
       paid_amount_twd: existing ? Number(existing.paid_amount_twd || 0) : 0,
       payment_date: existing?.payment_date || "",
       owner: $("owner").value.trim(),
@@ -198,7 +220,7 @@ function bindEntryForm() {
     persistLocal();
     resetEntryForm();
     renderAll();
-    showNotice("已儲存帳款到本機暫存。若要雲端保存，請到 Excel 頁按「儲存雲端暫存」。", "muted");
+    showNotice("已儲存帳款，本機已更新並會自動同步雲端。", "muted");
   });
 }
 
@@ -410,9 +432,63 @@ function persistLocal(markDirty = true) {
     })
   );
   if (markDirty) {
+    state.changeVersion += 1;
     state.dirty = true;
-    updateSaveStatus("本機已更新");
+    updateSaveStatus("本機已更新，準備自動同步雲端...");
+    scheduleCloudAutoSave();
   }
+}
+
+function clearCloudAutoSave() {
+  if (autoSaveTimer) window.clearTimeout(autoSaveTimer);
+  autoSaveTimer = undefined;
+}
+
+function scheduleCloudAutoSave() {
+  clearCloudAutoSave();
+  autoSaveTimer = window.setTimeout(() => {
+    syncChangesToCloud();
+  }, 1200);
+}
+
+async function syncChangesToCloud() {
+  autoSaveTimer = undefined;
+  if (!state.dirty) return;
+  if (state.cloudBusy) {
+    scheduleCloudAutoSave();
+    return;
+  }
+
+  state.cloudBusy = true;
+  applyPermissions();
+  updateSaveStatus("正在自動同步雲端...");
+  try {
+    const versionToSave = state.changeVersion;
+    const customerSnapshot = cloudSnapshot(state.customers);
+    const transactionSnapshot = cloudSnapshot(state.transactions);
+    await replaceCloudCollection("customers", customerSnapshot, "customer_id");
+    await replaceCloudCollection("transactions", transactionSnapshot, "id");
+    if (state.changeVersion !== versionToSave) {
+      state.dirty = true;
+      updateSaveStatus("偵測到新更動，正在排程下一次雲端同步...");
+      scheduleCloudAutoSave();
+      return;
+    }
+    const counts = await refreshFromCloud();
+    state.dirty = false;
+    updateSaveStatus(`雲端已自動儲存：${new Date().toLocaleString("zh-TW")}`);
+    showNotice(`已自動同步雲端：${counts.customers} 筆客戶、${counts.transactions} 筆帳款。`, "muted");
+  } catch (error) {
+    updateSaveStatus("雲端自動儲存失敗，本機資料仍保留");
+    showNotice(`雲端自動儲存失敗：${friendlyFirebaseError(error)}`);
+  } finally {
+    state.cloudBusy = false;
+    applyPermissions();
+  }
+}
+
+function cloudSnapshot(rows) {
+  return JSON.parse(JSON.stringify(rows));
 }
 
 async function saveCloud() {
@@ -420,6 +496,7 @@ async function saveCloud() {
     showNotice("你目前沒有雲端暫存的權限。");
     return;
   }
+  clearCloudAutoSave();
   await runCloudAction("cloudSaveBtn", "儲存中...", async () => {
     updateSaveStatus("正在儲存雲端...");
     try {
@@ -441,6 +518,7 @@ async function loadCloud(options = {}) {
     showNotice("你目前沒有讀取雲端暫存的權限。");
     return;
   }
+  clearCloudAutoSave();
   await runCloudAction("loadCloudBtn", "讀取中...", async () => {
     updateSaveStatus("正在讀取雲端...");
     try {
@@ -714,6 +792,8 @@ function renderDetails() {
     ["amount_twd", "台幣金額", money],
     ["settlement_cycle", "結帳方式"],
     ["grace_days", "付款天數"],
+    ["use_received_date_for_due", "收貨日起算", (value) => (value ? "是" : "-")],
+    ["goods_received_date", "收貨日期"],
     ["due_date", "到期日"],
     ["payment_date", "收付款日期"],
     ["paid_amount_twd", "已收/已付金額", money],
@@ -746,6 +826,8 @@ function loadSelectedRecordForEdit() {
   $("invoiceDate").value = record.invoice_date || todayISO();
   $("tradeFlow").value = record.trade_flow || "出口";
   $("accountSide").value = record.account_side || "應收";
+  $("useReceivedDateForDue").checked = Boolean(record.use_received_date_for_due);
+  $("goodsReceivedDate").value = record.goods_received_date || "";
   $("invoiceNo").value = record.invoice_no || "";
   $("currency").value = normalizeCurrency(record.currency);
   $("amountOriginal").value = record.amount_original || 0;
@@ -757,6 +839,7 @@ function loadSelectedRecordForEdit() {
   $("itemDescription").value = record.item_description || "";
   $("owner").value = record.owner || "";
   $("notes").value = record.notes || "";
+  updateReceivedGoodsControls();
   updateEntryPreview();
   showView("entry");
   showNotice("已載入帳款到表單，修改後按「儲存帳款」。", "muted");
@@ -1002,12 +1085,51 @@ function renderTable(table, columns, rows) {
   table.innerHTML = `${header}<tbody>${body}</tbody>`;
 }
 
+function isImportPayable(tradeFlow = $("tradeFlow").value, accountSide = $("accountSide").value) {
+  return tradeFlow === "進口" && accountSide === "應付";
+}
+
+function recordUsesReceivedDate(record) {
+  return isImportPayable(record.trade_flow, record.account_side)
+    && Boolean(record.use_received_date_for_due)
+    && Boolean(record.goods_received_date);
+}
+
+function settlementStartDate(record) {
+  return recordUsesReceivedDate(record) ? record.goods_received_date : record.invoice_date;
+}
+
+function updateReceivedGoodsControls() {
+  const eligible = isImportPayable();
+  const controls = $("receivedGoodsControls");
+  const checkbox = $("useReceivedDateForDue");
+  const dateField = $("goodsReceivedDateField");
+  const dateInput = $("goodsReceivedDate");
+  controls.classList.toggle("hidden", !eligible);
+  if (!eligible) checkbox.checked = false;
+  const useReceivedDate = eligible && checkbox.checked;
+  dateField.classList.toggle("hidden", !useReceivedDate);
+  dateInput.required = useReceivedDate;
+  $("settlementStartHint").textContent = useReceivedDate
+    ? "到期日會由收貨日期依付款條件往後計算。"
+    : eligible
+      ? "未啟用時，仍會由交易日期計算到期日。"
+      : "";
+}
+
 function updateEntryPreview() {
+  updateReceivedGoodsControls();
   const amount = Number($("amountOriginal").value || 0);
   const rate = Number($("exchangeRate").value || 1);
   $("amountTwdPreview").textContent = money(amount * rate);
+  const useReceivedDate = isImportPayable() && $("useReceivedDateForDue").checked;
+  const baseDate = useReceivedDate ? $("goodsReceivedDate").value : $("invoiceDate").value;
+  if (useReceivedDate && !baseDate) {
+    $("dueDatePreview").textContent = "請填收貨日";
+    return;
+  }
   $("dueDatePreview").textContent = calculateDueDate(
-    $("invoiceDate").value || todayISO(),
+    baseDate || todayISO(),
     $("settlementCycle").value,
     Number($("graceDays").value || 0)
   );
@@ -1037,6 +1159,7 @@ function resetEntryForm() {
   $("currency").value = "TWD";
   $("exchangeRate").value = "1";
   $("settlementCycle").value = "月結";
+  updateReceivedGoodsControls();
   updateEntryPreview();
 }
 
@@ -1054,7 +1177,9 @@ function enrichTransaction(record) {
   const exchangeRate = Number(record.exchange_rate || 1);
   const amountTwd = Math.round(amountOriginal * exchangeRate * 100) / 100;
   const paid = Number(record.paid_amount_twd || 0);
-  const dueDate = record.due_date || calculateDueDate(record.invoice_date, record.settlement_cycle, Number(record.grace_days || 0));
+  const dueStartDate = settlementStartDate(record) || record.invoice_date || todayISO();
+  const calculatedDueDate = calculateDueDate(dueStartDate, record.settlement_cycle, Number(record.grace_days || 0));
+  const dueDate = recordUsesReceivedDate(record) ? calculatedDueDate : record.due_date || calculatedDueDate;
   const outstanding = Math.max(amountTwd - paid, 0);
   const overdue = outstanding > 0 ? Math.max(daysBetween(dueDate, todayISO()), 0) : 0;
   return {
@@ -1063,7 +1188,8 @@ function enrichTransaction(record) {
     settlement_cycle: normalizeCycle(record.settlement_cycle),
     amount_twd: amountTwd,
     due_date: dueDate,
-    settlement_period: settlementPeriod(record.invoice_date, record.settlement_cycle),
+    due_start_date: dueStartDate,
+    settlement_period: settlementPeriod(dueStartDate, record.settlement_cycle),
     outstanding_twd: Math.round(outstanding * 100) / 100,
     days_overdue: overdue,
     computed_status: outstanding <= 0 ? "已結清" : overdue > 0 ? "逾期" : paid > 0 ? "部分" : "未結",
@@ -1310,10 +1436,15 @@ function parseTransactionRows(rows) {
       const amount = Number(readAlias(row, ["原幣金額", "金額", "amount_original"]) || 0);
       if (!counterparty || amount <= 0) return null;
       const currency = normalizeCurrency(readAlias(row, ["幣別", "currency"]));
+      const tradeFlow = readAlias(row, ["進出口", "trade_flow"]) || "出口";
+      const accountSide = readAlias(row, ["應收/應付", "account_side"]) || "應收";
+      const goodsReceivedDate = normalizeSheetDate(readAlias(row, ["收貨日期", "收到貨日期", "goods_received_date"]));
+      const useReceivedDateForDue = isImportPayable(tradeFlow, accountSide)
+        && (normalizeBoolean(readAlias(row, ["收貨日起算", "收到貨後起算", "use_received_date_for_due"])) || Boolean(goodsReceivedDate));
       return {
         id: readAlias(row, ["ID", "id"]) || crypto.randomUUID(),
-        trade_flow: readAlias(row, ["進出口", "trade_flow"]) || "出口",
-        account_side: readAlias(row, ["應收/應付", "account_side"]) || "應收",
+        trade_flow: tradeFlow,
+        account_side: accountSide,
         customer_id: readAlias(row, ["客戶編號", "Customer ID", "customer_id"]),
         counterparty,
         invoice_no: readAlias(row, ["發票號碼", "invoice_no"]),
@@ -1326,6 +1457,8 @@ function parseTransactionRows(rows) {
         settlement_cycle: normalizeCycle(readAlias(row, ["結帳方式", "settlement_cycle"])),
         invoice_date: normalizeSheetDate(readAlias(row, ["交易日期", "發票日期", "invoice_date"])) || todayISO(),
         grace_days: Number(readAlias(row, ["付款天數", "grace_days"]) || 0),
+        use_received_date_for_due: useReceivedDateForDue,
+        goods_received_date: goodsReceivedDate,
         paid_amount_twd: Number(readAlias(row, ["已收/已付金額", "paid_amount_twd"]) || 0),
         payment_date: normalizeSheetDate(readAlias(row, ["收付款日期", "payment_date"])),
         owner: readAlias(row, ["承辦人", "owner"]),
@@ -1373,6 +1506,10 @@ function normalizeSheetDate(value) {
   }
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? String(value).slice(0, 10) : toISODate(date);
+}
+
+function normalizeBoolean(value) {
+  return ["1", "true", "yes", "y", "是"].includes(String(value || "").trim().toLowerCase());
 }
 
 async function downloadExcel(usePicker) {
@@ -1433,6 +1570,9 @@ function buildWorkbook() {
     結帳期間: row.settlement_period,
     交易日期: row.invoice_date,
     付款天數: row.grace_days,
+    收貨日起算: row.use_received_date_for_due ? "是" : "否",
+    收貨日期: row.goods_received_date,
+    結款起算日: row.due_start_date,
     到期日: row.due_date,
     "已收/已付金額": row.paid_amount_twd,
     收付款日期: row.payment_date,

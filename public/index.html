@@ -95,6 +95,17 @@
                 <option>應付</option>
               </select>
             </label>
+            <div id="receivedGoodsControls" class="received-goods-controls wide hidden">
+              <label class="toggle-control">
+                <input id="useReceivedDateForDue" type="checkbox" />
+                <span>進口應付：收到貨後才開始算結款日</span>
+              </label>
+              <label id="goodsReceivedDateField" class="hidden">
+                收貨日期
+                <input id="goodsReceivedDate" type="date" />
+              </label>
+              <p id="settlementStartHint" class="field-hint"></p>
+            </div>
             <label>
               發票號碼
               <input id="invoiceNo" />

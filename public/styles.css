@@ -302,35 +302,32 @@ textarea:focus {
 }
 
 .received-goods-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(160px, 0.7fr);
-  align-items: end;
-  gap: 10px 14px;
+  display: block;
   padding: 12px;
   border: 1px solid #cfe0d8;
   border-radius: 8px;
   background: #f3f8f5;
 }
 
-.toggle-control {
-  flex-direction: row;
-  align-items: center;
-  min-height: 42px;
-  color: var(--ink);
-}
-
-.toggle-control input {
-  width: 18px;
-  min-height: 18px;
-  accent-color: var(--brand);
-}
-
 .field-hint {
-  grid-column: 1 / -1;
   margin: 0;
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
+}
+
+.receipt-action {
+  min-height: 34px;
+  padding: 6px 9px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.receipt-complete {
+  color: var(--brand-dark);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .form-summary {
@@ -497,10 +494,6 @@ tr:hover td {
   .wide,
   .form-summary {
     grid-column: span 1;
-  }
-
-  .received-goods-controls {
-    grid-template-columns: 1fr;
   }
 
   .form-summary {

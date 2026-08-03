@@ -82,6 +82,10 @@
               <input id="invoiceDate" type="date" required />
             </label>
             <label>
+              Key 單日期
+              <input id="keyinDate" type="date" required />
+            </label>
+            <label>
               進出口
               <select id="tradeFlow">
                 <option>出口</option>
@@ -111,13 +115,10 @@
               </select>
             </label>
             <label>
-              原幣金額
+              金額
               <input id="amountOriginal" type="number" min="0" step="0.01" required />
             </label>
-            <label>
-              匯率
-              <input id="exchangeRate" type="number" min="0" step="0.0001" required />
-            </label>
+            <input id="exchangeRate" type="hidden" value="1" />
             <label>
               結帳方式
               <select id="settlementCycle">
@@ -152,7 +153,7 @@
               <textarea id="notes" rows="3"></textarea>
             </label>
             <div class="form-summary">
-              <div><span>台幣金額</span><strong id="amountTwdPreview">0</strong></div>
+              <div><span>金額</span><strong id="amountOriginalPreview">0 TWD</strong></div>
               <div><span>到期日</span><strong id="dueDatePreview">-</strong></div>
               <button type="submit" class="primary">儲存帳款</button>
             </div>
@@ -170,7 +171,7 @@
               <select id="paymentRecordSelect"></select>
             </label>
             <label>
-              本次收/付款金額
+              本次收/付款金額（依所選幣別）
               <input id="paymentAmount" type="number" min="0" step="0.01" />
             </label>
             <label>

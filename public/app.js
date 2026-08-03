@@ -135,7 +135,7 @@ function bindEntryForm() {
 
   $("customerSelect").addEventListener("change", async () => {
     const customer = state.customers.find((item) => item.customer_id === $("customerSelect").value);
-    $("customerId").readOnly = !!customer;
+    $("customerId").readOnly = false;
     if (!customer) {
       $("customerId").value = "";
       $("counterparty").value = "";
@@ -156,7 +156,7 @@ function bindEntryForm() {
     updateEntryPreview();
   });
 
-  ["invoiceDate", "amountOriginal", "exchangeRate", "settlementCycle", "graceDays"].forEach((id) => {
+  ["invoiceDate", "keyinDate", "amountOriginal", "exchangeRate", "settlementCycle", "graceDays"].forEach((id) => {
     $(id).addEventListener("input", updateEntryPreview);
   });
 
@@ -196,9 +196,11 @@ function bindEntryForm() {
       exchange_rate: Number($("exchangeRate").value || 1),
       settlement_cycle: normalizeCycle($("settlementCycle").value),
       invoice_date: $("invoiceDate").value,
+      keyin_date: $("keyinDate").value || $("invoiceDate").value,
       grace_days: Number($("graceDays").value || 0),
       use_received_date_for_due: importPayable,
       goods_received_date: importPayable ? existing?.goods_received_date || "" : "",
+      paid_amount: existing ? enrichTransaction(existing).paid_original : 0,
       paid_amount_twd: existing ? Number(existing.paid_amount_twd || 0) : 0,
       payment_date: existing?.payment_date || "",
       owner: $("owner").value.trim(),
@@ -222,7 +224,7 @@ function bindEntryForm() {
 function bindPaymentForm() {
   $("paymentRecordSelect").addEventListener("change", () => {
     const record = enrichedTransactions().find((item) => item.id === $("paymentRecordSelect").value);
-    $("paymentAmount").value = record ? record.outstanding_twd : "";
+    $("paymentAmount").value = record ? record.outstanding_original : "";
   });
 
   $("registerPaymentBtn").addEventListener("click", () => {
@@ -239,7 +241,8 @@ function bindPaymentForm() {
       return;
     }
     const enriched = enrichTransaction(record);
-    record.paid_amount_twd = Math.min(enriched.amount_twd, Number(record.paid_amount_twd || 0) + amount);
+    record.paid_amount = Math.min(enriched.amount_original, enriched.paid_original + amount);
+    record.paid_amount_twd = Math.round(record.paid_amount * Number(record.exchange_rate || 1) * 100) / 100;
     record.payment_date = paymentDate;
     record.updated_at = new Date().toISOString();
     persistLocal();
@@ -703,7 +706,7 @@ function renderUpcoming() {
     ["customer_id", "客戶編號"],
     ["counterparty", "客戶/供應商"],
     ["account_side", "應收/應付"],
-    ["outstanding_twd", "未結金額", money],
+    ["outstanding_original", "未結金額", (value, row) => moneyWithCurrency(value, row.currency)],
   ], rows);
 }
 
@@ -728,7 +731,7 @@ function checkDueSoonAlert() {
     ["counterparty", "客戶/供應商"],
     ["account_side", "應收/應付"],
     ["invoice_no", "發票號碼"],
-    ["outstanding_twd", "未結金額", money],
+    ["outstanding_original", "未結金額", (value, row) => moneyWithCurrency(value, row.currency)],
   ], rows);
   $("dueModal").classList.remove("hidden");
 }
@@ -738,23 +741,24 @@ function renderRecent() {
   renderTable($("recentTable"), [
     ["computed_status", "狀態"],
     ["invoice_date", "交易日期"],
+    ["keyin_date", "Key 單日期"],
     ["customer_id", "客戶編號"],
     ["counterparty", "客戶/供應商"],
     ["account_side", "應收/應付"],
     ["currency", "幣別"],
-    ["amount_twd", "台幣金額", money],
-    ["outstanding_twd", "未結金額", money],
+    ["amount_original", "金額", (value, row) => moneyWithCurrency(value, row.currency)],
+    ["outstanding_original", "未結金額", (value, row) => moneyWithCurrency(value, row.currency)],
     ["due_date_display", "到期日"],
   ], rows);
 }
 
 function renderPayments() {
   const rows = enrichedTransactions();
-  const outstanding = rows.filter((row) => row.outstanding_twd > 0 && !row.awaiting_goods_receipt);
+  const outstanding = rows.filter((row) => row.outstanding_original > 0 && !row.awaiting_goods_receipt);
   $("paymentRecordSelect").innerHTML = outstanding.length
-    ? outstanding.map((row) => `<option value="${row.id}">${escapeHtml(`${row.due_date} | ${row.account_side} | ${row.customer_id || ""} ${row.counterparty} | 未結 ${money(row.outstanding_twd)}`)}</option>`).join("")
+    ? outstanding.map((row) => `<option value="${row.id}">${escapeHtml(`${row.due_date} | ${row.account_side} | ${row.customer_id || ""} ${row.counterparty} | 未結 ${moneyWithCurrency(row.outstanding_original, row.currency)}`)}</option>`).join("")
     : `<option value="">沒有未結帳款</option>`;
-  if (outstanding.length) $("paymentAmount").value = outstanding[0].outstanding_twd;
+  if (outstanding.length) $("paymentAmount").value = outstanding[0].outstanding_original;
   $("paymentDate").value = $("paymentDate").value || todayISO();
 
   renderTable($("paidTable"), [
@@ -763,11 +767,12 @@ function renderPayments() {
     ["customer_id", "客戶編號"],
     ["counterparty", "客戶/供應商"],
     ["invoice_no", "發票號碼"],
+    ["currency", "幣別"],
     ["payment_date", "收付款日期"],
-    ["paid_amount_twd", "已收/已付金額", money],
-    ["outstanding_twd", "未結金額", money],
-    ["amount_twd", "台幣金額", money],
-  ], rows.filter((row) => Number(row.paid_amount_twd || 0) > 0));
+    ["paid_original", "已收/已付金額", (value, row) => moneyWithCurrency(value, row.currency)],
+    ["outstanding_original", "未結金額", (value, row) => moneyWithCurrency(value, row.currency)],
+    ["amount_original", "金額", (value, row) => moneyWithCurrency(value, row.currency)],
+  ], rows.filter((row) => Number(row.paid_original || 0) > 0));
 }
 
 function renderDetails() {
@@ -786,35 +791,41 @@ function renderDetails() {
     ["customer_id", "客戶編號"],
     ["counterparty", "客戶/供應商"],
     ["invoice_no", "發票號碼"],
+    ["keyin_date", "Key 單日期"],
     ["currency", "幣別"],
-    ["amount_original", "原幣金額", money],
-    ["exchange_rate", "匯率"],
-    ["amount_twd", "台幣金額", money],
+    ["amount_original", "金額", (value, row) => moneyWithCurrency(value, row.currency)],
     ["settlement_cycle", "結帳方式"],
     ["grace_days", "付款天數"],
     ["goods_received_date", "收貨日期", (value, row) => row.awaiting_goods_receipt ? "待收貨" : value || "-"],
     ["receipt_action", "收貨", (_, row) => receiptAction(row), true],
     ["due_date_display", "到期日"],
     ["payment_date", "收付款日期"],
-    ["paid_amount_twd", "已收/已付金額", money],
-    ["outstanding_twd", "未結金額", money],
+    ["paid_original", "已收/已付金額", (value, row) => moneyWithCurrency(value, row.currency)],
+    ["outstanding_original", "未結金額", (value, row) => moneyWithCurrency(value, row.currency)],
     ["days_overdue", "逾期天數"],
     ["owner", "承辦人"],
+    ["edit_action", "修改", (_, row) => `<button type="button" class="secondary receipt-action" data-edit-record-id="${escapeHtml(row.id)}">修改</button>`, true],
   ], rows);
   $("detailTable").querySelectorAll("[data-receive-goods-id]").forEach((button) => {
     button.addEventListener("click", () => markGoodsReceived(button.dataset.receiveGoodsId));
+  });
+  $("detailTable").querySelectorAll("[data-edit-record-id]").forEach((button) => {
+    button.addEventListener("click", () => loadRecordForEdit(button.dataset.editRecordId));
   });
   renderEditRecordSelect(rows);
 }
 
 function renderEditRecordSelect(rows = enrichedTransactions()) {
   $("editRecordSelect").innerHTML = rows.length
-    ? rows.map((row) => `<option value="${row.id}">${escapeHtml(`${row.invoice_date} | ${row.customer_id || ""} ${row.counterparty} | ${row.invoice_no || "無發票"} | ${money(row.outstanding_twd)}`)}</option>`).join("")
+    ? rows.map((row) => `<option value="${row.id}">${escapeHtml(`${row.invoice_date} | ${row.customer_id || ""} ${row.counterparty} | ${row.invoice_no || "無發票"} | ${moneyWithCurrency(row.outstanding_original, row.currency)}`)}</option>`).join("")
     : `<option value="">沒有帳款</option>`;
 }
 
 function loadSelectedRecordForEdit() {
-  const id = $("editRecordSelect").value;
+  loadRecordForEdit($("editRecordSelect").value);
+}
+
+function loadRecordForEdit(id) {
   const record = state.transactions.find((item) => item.id === id);
   if (!record) return;
   if (!can("editTransactions")) {
@@ -824,9 +835,10 @@ function loadSelectedRecordForEdit() {
   state.editingTransactionId = id;
   $("customerSelect").value = record.customer_id || "";
   $("customerId").value = record.customer_id || "";
-  $("customerId").readOnly = !!record.customer_id;
+  $("customerId").readOnly = false;
   $("counterparty").value = record.counterparty || "";
   $("invoiceDate").value = record.invoice_date || todayISO();
+  $("keyinDate").value = record.keyin_date || record.invoice_date || todayISO();
   $("tradeFlow").value = record.trade_flow || "出口";
   $("accountSide").value = record.account_side || "應收";
   $("invoiceNo").value = record.invoice_no || "";
@@ -1140,8 +1152,7 @@ function markGoodsReceived(id) {
 function updateEntryPreview() {
   updateReceivedGoodsControls();
   const amount = Number($("amountOriginal").value || 0);
-  const rate = Number($("exchangeRate").value || 1);
-  $("amountTwdPreview").textContent = money(amount * rate);
+  $("amountOriginalPreview").textContent = moneyWithCurrency(amount, $("currency").value);
   const current = state.transactions.find((record) => record.id === state.editingTransactionId);
   const goodsReceivedDate = isImportPayable() ? current?.goods_received_date || "" : "";
   if (isImportPayable() && !goodsReceivedDate) {
@@ -1185,6 +1196,7 @@ function resetEntryForm() {
 
 function setDefaultDates() {
   $("invoiceDate").value = $("invoiceDate").value || todayISO();
+  $("keyinDate").value = $("keyinDate").value || todayISO();
   $("paymentDate").value = $("paymentDate").value || todayISO();
 }
 
@@ -1196,26 +1208,35 @@ function enrichTransaction(record) {
   const amountOriginal = Number(record.amount_original || 0);
   const exchangeRate = Number(record.exchange_rate || 1);
   const amountTwd = Math.round(amountOriginal * exchangeRate * 100) / 100;
-  const paid = Number(record.paid_amount_twd || 0);
+  const legacyPaidTwd = Number(record.paid_amount_twd || 0);
+  const paidOriginal = record.paid_amount === undefined || record.paid_amount === null
+    ? legacyPaidTwd / exchangeRate
+    : Number(record.paid_amount || 0);
+  const paidTwd = Math.round(paidOriginal * exchangeRate * 100) / 100;
   const awaitingGoodsReceipt = recordAwaitingGoodsReceipt(record);
   const dueStartDate = awaitingGoodsReceipt ? "" : settlementStartDate(record) || record.invoice_date || todayISO();
   const calculatedDueDate = dueStartDate ? calculateDueDate(dueStartDate, record.settlement_cycle, Number(record.grace_days || 0)) : "";
   const dueDate = awaitingGoodsReceipt ? "" : recordUsesReceivedDate(record) ? calculatedDueDate : record.due_date || calculatedDueDate;
-  const outstanding = Math.max(amountTwd - paid, 0);
-  const overdue = outstanding > 0 && dueDate ? Math.max(daysBetween(dueDate, todayISO()), 0) : 0;
+  const outstandingOriginal = Math.max(amountOriginal - paidOriginal, 0);
+  const outstandingTwd = Math.max(amountTwd - paidTwd, 0);
+  const overdue = outstandingOriginal > 0 && dueDate ? Math.max(daysBetween(dueDate, todayISO()), 0) : 0;
   return {
     ...record,
     currency: normalizeCurrency(record.currency),
     settlement_cycle: normalizeCycle(record.settlement_cycle),
+    keyin_date: record.keyin_date || record.invoice_date || todayISO(),
     amount_twd: amountTwd,
+    paid_original: Math.round(paidOriginal * 100) / 100,
+    paid_amount_twd: paidTwd,
+    outstanding_original: Math.round(outstandingOriginal * 100) / 100,
     due_date: dueDate,
     due_date_display: awaitingGoodsReceipt ? "收到貨後計算" : dueDate,
     due_start_date: dueStartDate,
     settlement_period: awaitingGoodsReceipt ? "待收貨" : settlementPeriod(dueStartDate, record.settlement_cycle),
-    outstanding_twd: Math.round(outstanding * 100) / 100,
+    outstanding_twd: Math.round(outstandingTwd * 100) / 100,
     days_overdue: overdue,
     awaiting_goods_receipt: awaitingGoodsReceipt,
-    computed_status: outstanding <= 0 ? "已結清" : awaitingGoodsReceipt ? "待收貨" : overdue > 0 ? "逾期" : paid > 0 ? "部分" : "未結",
+    computed_status: outstandingOriginal <= 0 ? "已結清" : awaitingGoodsReceipt ? "待收貨" : overdue > 0 ? "逾期" : paidOriginal > 0 ? "部分" : "未結",
   };
 }
 
@@ -1248,8 +1269,10 @@ function buildDemoTransactions() {
       exchange_rate: exchangeRate,
       settlement_cycle: normalizeCycle(customer.settlement_cycle || "月結"),
       invoice_date: addDays(dueDate, -Math.max(graceDays, 1)),
+      keyin_date: todayISO(),
       grace_days: graceDays,
       due_date: dueDate,
+      paid_amount: spec.paid,
       paid_amount_twd: spec.paid,
       payment_date: spec.paid > 0 ? addDays(todayISO(), -1) : "",
       owner: customer.sales_person || "",
@@ -1353,6 +1376,13 @@ function normalizeCycle(value) {
 
 function money(value) {
   return Number(value || 0).toLocaleString("zh-TW", { maximumFractionDigits: 0 });
+}
+
+function moneyWithCurrency(value, currency) {
+  const normalized = normalizeCurrency(currency);
+  const maximumFractionDigits = normalized === "TWD" || normalized === "JPY" ? 0 : 2;
+  const amount = Number(value || 0).toLocaleString("zh-TW", { maximumFractionDigits });
+  return `${amount} ${normalized}`;
 }
 
 function sum(rows, field) {
@@ -1461,7 +1491,11 @@ function parseTransactionRows(rows) {
       const currency = normalizeCurrency(readAlias(row, ["幣別", "currency"]));
       const tradeFlow = readAlias(row, ["進出口", "trade_flow"]) || "出口";
       const accountSide = readAlias(row, ["應收/應付", "account_side"]) || "應收";
+      const invoiceDate = normalizeSheetDate(readAlias(row, ["交易日期", "發票日期", "invoice_date"])) || todayISO();
       const goodsReceivedDate = normalizeSheetDate(readAlias(row, ["收貨日期", "收到貨日期", "goods_received_date"]));
+      const exchangeRate = Number(readAlias(row, ["匯率", "exchange_rate"]) || 1);
+      const importedPaidAmount = Number(readAlias(row, ["已收/已付金額", "paid_amount", "paid_amount_original", "paid_amount_twd"]) || 0);
+      const legacyTwdPayment = row["匯率"] !== undefined || row["台幣金額"] !== undefined || row.paid_amount_twd !== undefined;
       const useReceivedDateForDue = isImportPayable(tradeFlow, accountSide);
       return {
         id: readAlias(row, ["ID", "id"]) || crypto.randomUUID(),
@@ -1475,13 +1509,15 @@ function parseTransactionRows(rows) {
         item_description: readAlias(row, ["品名/摘要", "item_description"]),
         currency,
         amount_original: amount,
-        exchange_rate: Number(readAlias(row, ["匯率", "exchange_rate"]) || 1),
+        exchange_rate: exchangeRate,
         settlement_cycle: normalizeCycle(readAlias(row, ["結帳方式", "settlement_cycle"])),
-        invoice_date: normalizeSheetDate(readAlias(row, ["交易日期", "發票日期", "invoice_date"])) || todayISO(),
+        invoice_date: invoiceDate,
+        keyin_date: normalizeSheetDate(readAlias(row, ["Key 單日期", "Key單日期", "keyin_date"])) || invoiceDate,
         grace_days: Number(readAlias(row, ["付款天數", "grace_days"]) || 0),
         use_received_date_for_due: useReceivedDateForDue,
         goods_received_date: goodsReceivedDate,
-        paid_amount_twd: Number(readAlias(row, ["已收/已付金額", "paid_amount_twd"]) || 0),
+        paid_amount: legacyTwdPayment ? importedPaidAmount / exchangeRate : importedPaidAmount,
+        paid_amount_twd: legacyTwdPayment ? importedPaidAmount : Math.round(importedPaidAmount * exchangeRate * 100) / 100,
         payment_date: normalizeSheetDate(readAlias(row, ["收付款日期", "payment_date"])),
         owner: readAlias(row, ["承辦人", "owner"]),
         notes: readAlias(row, ["備註", "notes"]),
@@ -1581,20 +1617,19 @@ function buildWorkbook() {
     "提單/報關號碼": row.shipment_no,
     "品名/摘要": row.item_description,
     幣別: row.currency,
-    原幣金額: row.amount_original,
-    匯率: row.exchange_rate,
-    台幣金額: row.amount_twd,
+    金額: row.amount_original,
     結帳方式: row.settlement_cycle,
     結帳期間: row.settlement_period,
     交易日期: row.invoice_date,
+    "Key 單日期": row.keyin_date || row.invoice_date,
     付款天數: row.grace_days,
     收貨日起算: row.awaiting_goods_receipt ? "待收貨" : isImportPayable(row.trade_flow, row.account_side) ? "已收貨" : "不適用",
     收貨日期: row.goods_received_date,
     結款起算日: row.due_start_date,
     到期日: row.due_date_display,
-    "已收/已付金額": row.paid_amount_twd,
+    "已收/已付金額": row.paid_original,
     收付款日期: row.payment_date,
-    未結金額: row.outstanding_twd,
+    未結金額: row.outstanding_original,
     逾期天數: row.days_overdue,
     承辦人: row.owner,
     備註: row.notes,
